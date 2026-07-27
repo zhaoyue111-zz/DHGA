@@ -18,7 +18,10 @@ def make_local_boundary_corruption(
 
     Positive perturbation moves the boundary outward; recovery target is the inverse.
     """
-    modes = modes or ["inward", "outward", "zero"]
+    modes = [mode.lower().replace("_", " ").replace("-", " ") for mode in (modes or ["inward", "outward", "zero"])]
+    allow_outward = any(mode in {"outward", "smooth local offset", "local bulge", "attached false positive like protrusion", "protrusion", "bulge"} for mode in modes)
+    allow_inward = any(mode in {"inward", "smooth local offset", "local indentation", "missing boundary like gap", "indentation", "gap"} for mode in modes)
+    allow_zero = "zero" in modes or not (allow_outward and allow_inward)
     device = teacher_sdf.device
     dtype = teacher_sdf.dtype
     noise = torch.randn((*teacher_sdf.shape[:2], *lowres_shape), device=device, dtype=dtype)
@@ -29,9 +32,11 @@ def make_local_boundary_corruption(
     kernel = max(kernel, 1)
     smooth = F.avg_pool3d(smooth, kernel_size=kernel, stride=1, padding=kernel // 2)
     smooth = smooth / smooth.abs().amax(dim=(2, 3, 4), keepdim=True).clamp_min(1e-6)
-    outward = (smooth > 0.25).to(dtype)
-    inward = (smooth < -0.25).to(dtype)
+    outward = (smooth > 0.25).to(dtype) if allow_outward else torch.zeros_like(smooth)
+    inward = (smooth < -0.25).to(dtype) if allow_inward else torch.zeros_like(smooth)
     signed = outward - inward
+    if allow_zero:
+        signed = torch.where(smooth.abs() <= 0.25, torch.zeros_like(signed), signed)
     amp = torch.empty((*teacher_sdf.shape[:2], 1, 1, 1), device=device, dtype=dtype).uniform_(0.25, 1.0)
     perturb = signed * amp * float(max_offset_mm)
     if stable_band is not None:

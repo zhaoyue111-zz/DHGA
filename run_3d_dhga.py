@@ -18,6 +18,7 @@ ARCHITECTURE_KEYS = {
     "dhga_appearance_hidden_ratio",
     "dhga_geometry_feature_layer",
     "dhga_geometry_feature_channels",
+    "dhga_router_normalization",
     "dhga_search_radius_mm",
     "dhga_ray_step_mm",
     "dhga_max_boundary_points",
@@ -32,7 +33,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--self_check", action="store_true", help="Run synthetic smoke test and config validation")
     parser.add_argument("--dry_run", action="store_true", help="Validate config and print planned modules without training")
     parser.add_argument("--train", action="store_true", help="Launch the selected real DHGA stage trainer")
-    parser.add_argument("--evaluate_only", action="store_true", help="Run sliding-window DHGA prediction/evaluation without training")
+    parser.add_argument("--evaluate_only", "--evaluation_only", action="store_true", help="Run sliding-window DHGA prediction/evaluation without training")
+    parser.add_argument("--predict", "--test", action="store_true", help="Alias for --evaluate_only without training")
     parser.add_argument("--device", default=None)
     parser.add_argument("--save_dir", default=".save/dhga")
     parser.add_argument("--prompts", nargs="*", default=["liver"])
@@ -81,7 +83,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dhga_corruption_modes", nargs="*", default=["inward", "outward"])
     parser.add_argument("--dhga_boundary_recovery_weight", type=float, default=1.0)
     parser.add_argument("--dhga_transport_equivariance_weight", type=float, default=0.1)
-    parser.add_argument("--dhga_prompt_ranking_weight", type=float, default=0.05)
+    parser.add_argument("--dhga_prompt_ranking_weight", type=float, default=0.0)
     parser.add_argument("--dhga_minimal_transport_weight", type=float, default=0.01)
     parser.add_argument("--dhga_transport_smoothness_weight", type=float, default=0.0)
     parser.add_argument("--dhga_debug_outputs", action="store_true")
@@ -201,12 +203,12 @@ def main() -> None:
         trainer.fit()
         return
 
-    if args.evaluate_only:
+    if args.evaluate_only or args.predict:
         evaluator = DHGAEvaluator(config, prompts, save_dir, args.val_label_dir, args.label_values)
         print(json.dumps(evaluator.evaluate_split("test", args.max_cases), indent=2))
         return
 
-    raise SystemExit("No action selected. Use --self_check, --dry_run, or --train.")
+    raise SystemExit("No action selected. Use --self_check, --dry_run, --train, --predict, or --evaluation_only.")
 
 
 if __name__ == "__main__":

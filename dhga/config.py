@@ -58,7 +58,12 @@ class DHGAConfig:
     dhga_debug_outputs: bool = False
     pred_threshold: float = 0.5
 
+    def __post_init__(self) -> None:
+        self.validate()
+
     def validate(self) -> None:
+        if self.init_checkpoint and self.resume_checkpoint:
+            raise ValueError("--init_checkpoint and --resume_checkpoint are mutually exclusive")
         if self.dhga_stage not in {"A", "B", "C", "D"}:
             raise ValueError("dhga_stage must be one of A, B, C, D")
         if self.epochs < 0 or self.steps_per_volume < 0:

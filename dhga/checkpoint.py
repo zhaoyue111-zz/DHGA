@@ -62,6 +62,7 @@ def load_training_checkpoint(
     ema: nn.Module | None = None,
     scaler: Any | None = None,
     load_training_state: bool = True,
+    expected_stage: str | None = None,
 ) -> dict[str, Any]:
     payload = torch.load(path, map_location="cpu", weights_only=False)
     if payload.get("format") == "dhga_checkpoint_v1":
@@ -72,6 +73,10 @@ def load_training_checkpoint(
         return {"epoch": 0, "global_step": 0, "metadata": payload.get("metadata", {})}
     if payload.get("format") != "dhga_training_checkpoint_v1":
         raise RuntimeError("Not a DHGA training checkpoint")
+    metadata = payload.get("metadata", {})
+    checkpoint_stage = metadata.get("stage") or payload.get("config", {}).get("dhga_stage")
+    if expected_stage is not None and checkpoint_stage is not None and str(checkpoint_stage) != str(expected_stage):
+        raise RuntimeError(f"Checkpoint stage {checkpoint_stage} does not match current stage {expected_stage}")
     model.load_state_dict(payload["model"], strict=True)
     if load_training_state and optimizer is not None and payload.get("optimizer") is not None:
         optimizer.load_state_dict(payload["optimizer"])

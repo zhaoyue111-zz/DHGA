@@ -20,15 +20,15 @@ The current DHGA code provides typed configuration, migrated VoxTell utility cod
 - `dhga/shared_voxtell.py`: defines `SharedVoxTellFeatures` and `SharedEncoderOnce`; experts consume explicit feature caches rather than hooks.
 - `dhga/experts/semantic_expert.py`: semantic expert wrapper for prompt-decoder-biased logits, intended to use cross-attention LoRA in `transformer_decoder.layers.*.multihead_attn`.
 - `dhga/experts/appearance_expert.py`: residual 3D feature adapters on selected shared skip features. Each adapter is channel bottleneck plus depthwise 3D convolution and is zero-initialized at the residual output.
-- `dhga/routing/disagreement_router.py`: lightweight spatial router from semantic probability, appearance probability, stable foreground/background, and disagreement to per-voxel `w_sem(x)`, `w_app(x)`, `w_geo(x)`, consensus supervision weight, geometry disagreement weight, and initial fusion probability.
+- `dhga/routing/disagreement_router.py`: lightweight spatial router from semantic probability, appearance probability, low-dimensional visual context, stable foreground/background, and disagreement to per-voxel `w_sem(x)`, `w_app(x)`, `w_geo(x)`, consensus supervision weight, geometry disagreement weight, and initial fusion probability.
 - `dhga/geometry/sdf.py`: SDF uses one global convention: inside is negative, outside is positive.
 - `dhga/geometry/ray_sampler.py`: 3D ray sampling converts z,y,x voxel points to x,y,z `grid_sample` coordinates with `align_corners=True`; offsets are in millimeters and divided by per-axis spacing.
 - `dhga/geometry/boundary_corruption.py`: creates inward and outward SDF perturbations with recovery targets derived by sign convention.
 - `dhga/geometry/transport_head.py`: lightweight ray-token head with an explicit zero-displacement center bias and fallback for fully invalid rays.
 - `dhga/geometry/boundary_points.py`: extracts zero-level-set surface points using `dhga_surface_tolerance_mm`; empty and full masks produce no valid surface. Sparse displacements are diffused back with a physical millimeter Gaussian kernel.
 - `dhga/voxtell_model.py`: real VoxTell-backed DHGA model. One encoder pass builds a shared feature cache; semantic output enables prompt-decoder LoRA, appearance output disables semantic LoRA and uses residual skip adapters, and anchor/baseline output disables both LoRA and appearance adapters. Geometry receives image/probability/SDF/ray offset evidence, prompt embeddings, and explicitly passed projected VoxTell intermediate visual features.
-- `dhga/trainer.py`: implements real Stage A/B/C/D training loops over unlabeled NIfTI volumes. Labels are not loaded by the trainer. `--init_checkpoint` transfers Stage B to C and Stage C to D; `--resume_checkpoint` restores model, optimizer, lightweight EMA, AMP scaler, epoch, global step, and RNG.
-- `dhga/evaluation.py`: evaluation-only sliding prediction. It aggregates semantic/app probabilities and VoxTell visual features in crop space, applies one SDF geometry correction, restores original space, saves NIfTI, and reads GT only for optional metrics.
+- `dhga/trainer.py`: implements real Stage A/B/C/D training loops over unlabeled NIfTI volumes. Labels are not loaded by the trainer. Stage C/D patch ordering is guided by EMA/student pseudo-boundary scores rather than GT. `--init_checkpoint` transfers Stage B to C and Stage C to D; `--resume_checkpoint` restores model, optimizer, lightweight EMA, AMP scaler, epoch, global step, and RNG, and same-stage resume is enforced.
+- `dhga/evaluation.py`: evaluation-only sliding prediction. It aggregates semantic/app probabilities and VoxTell visual features in crop space, applies one SDF geometry correction, restores original space, saves NIfTI, and reads GT only for optional metrics including Dice, IoU, precision, recall, FP/FN voxels, volume ratio, and connected components.
 - `dhga/losses.py`: cross-supervision is weighted by stable consensus and downweighted by disagreement, so high-disagreement voxels are not forced into agreement.
 - `dhga/checkpoint.py`: DHGA checkpoint payloads are versioned and loaded strictly; non-DHGA checkpoints are refused.
 
@@ -47,7 +47,7 @@ The current DHGA code provides typed configuration, migrated VoxTell utility cod
 
 Default DHGA configuration sets `dhga_freeze_voxtell=True`. Trainable parameters are intended to be:
 
-- Stage B trains semantic prompt-decoder LoRA and appearance residual adapters.
+- Stage B trains semantic prompt-decoder LoRA, appearance residual adapters, and the spatial router warm-up parameters.
 - Stage C freezes region experts and trains geometry visual projection, ray prompt projection, and transport head.
 - Stage D freezes region experts by default and trains spatial router plus geometry modules.
 - optional EMA teacher copies are updated without gradient.
@@ -75,11 +75,11 @@ Frozen VoxTell encoder, text encoder, original prompt decoder base weights, and 
 
 ## Spacing And Category Scope
 
-Reader spacing is read from NIfTI properties and used as returned because the reader properties already match array axis order. The code does not reverse xyz to zyx. The same physical spacing is used by SDF, normals, rays, boundary perturbation, and dense displacement diffusion. Current DHGA geometry is explicitly single-class binary adaptation. Multi-class support should build per-class SDFs, boundary point sets, prompt-conditioned ray tokens, and losses.
+Reader spacing is read from NIfTI properties and used as returned because the reader properties already match array axis order. The code does not reverse xyz to zyx. The same physical spacing is used by SDF, normals, rays, boundary perturbation, and dense displacement diffusion. Current DHGA geometry is explicitly single-class binary adaptation; model construction raises if geometry is enabled with multiple prompts. Multi-class support should build per-class SDFs, boundary point sets, prompt-conditioned ray tokens, and losses.
 
 ## Router And Geometry Gate
 
-The spatial router predicts `w_sem(x)`, `w_app(x)`, and `w_geo(x)`. Region probability is computed by renormalizing only `w_sem` and `w_app`, so `w_geo` cannot suppress foreground probability by stealing mass. `w_geo` is used as geometry gate and contributes to boundary point sampling, displacement magnitude, and final narrow-band replacement.
+The spatial router predicts `w_sem(x)`, `w_app(x)`, and `w_geo(x)`. Region probability is computed by renormalizing only `w_sem` and `w_app`, so `w_geo` cannot suppress foreground probability by stealing mass. The untrained router initializes near an even semantic/appearance blend with a small geometry gate. `w_geo` is used as geometry gate and contributes to boundary point sampling, displacement magnitude, and final narrow-band replacement.
 
 ## External References
 

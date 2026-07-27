@@ -20,6 +20,13 @@ def cross_supervision_loss(sem_prob: Tensor, app_prob: Tensor, router: RouterOut
     return 0.5 * (sem_to_app + app_to_sem)
 
 
+def router_fusion_loss(router: RouterOutput, target_prob: Tensor, weight: Tensor | None = None) -> Tensor:
+    loss = F.binary_cross_entropy(router.fused_prob.clamp(1e-6, 1 - 1e-6), target_prob.detach(), reduction="none")
+    if weight is None:
+        return loss.mean()
+    return (loss * weight.detach()).sum() / weight.detach().sum().clamp_min(1.0)
+
+
 def boundary_recovery_loss(predicted_displacement: Tensor, target_displacement: Tensor, valid_mask: Tensor) -> Tensor:
     loss = (predicted_displacement - target_displacement.detach()).abs()
     return (loss * valid_mask.detach()).sum() / valid_mask.detach().sum().clamp_min(1.0)

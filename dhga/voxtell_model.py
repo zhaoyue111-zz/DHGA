@@ -209,12 +209,12 @@ class DHGAVoxTellModel(nn.Module):
             appearance_logits, _ = self.decode_from_features(app_features.encoder_stages, app_features.selected_feature)
         sem_prob = self._class_probs(semantic_logits)
         app_prob = self._class_probs(appearance_logits)
-        self._last_geometry_feature = features.encoder_stages[self.geometry_feature_idx]
         with torch.no_grad(), self.lora_disabled(), self.appearance_disabled():
             anchor_logits, _ = self.decode_from_features(features.encoder_stages, features.selected_feature)
             anchor_prob = self._class_probs(anchor_logits)
-        router = self.router(sem_prob, app_prob)
         visual_feature = features.encoder_stages[self.geometry_feature_idx]
+        router_visual = self.geometry_visual_proj(visual_feature).detach().mean(dim=1, keepdim=True)
+        router = self.router(sem_prob, app_prob, visual_context=router_visual)
         geometry = self.run_geometry(image, sem_prob, app_prob, router, self.text_embeddings, spacing, visual_feature=visual_feature) if run_geometry and self.config.dhga_geometry_enabled else {}
         final_prob = router.fused_prob
         if "dense_displacement_mm" in geometry:
@@ -468,5 +468,7 @@ class DHGAVoxTellModel(nn.Module):
 
 def build_dhga_voxtell_model(config: DHGAConfig, prompts_or_file: list[str]) -> tuple[DHGAVoxTellModel, Any, list[str]]:
     prompts = load_prompts(prompts_or_file)
+    if config.dhga_geometry_enabled and len(prompts) != 1:
+        raise ValueError("Current DHGA geometry is single-class binary; pass exactly one prompt or disable geometry")
     model, predictor = DHGAVoxTellModel.from_voxtell(config.voxtell_repo, config.model_dir, prompts, config)
     return model, predictor, prompts

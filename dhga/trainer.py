@@ -17,7 +17,7 @@ from .experts import AppearanceExpert, SemanticExpert
 from .geometry import GeometryTransportHead, make_ray_offsets_mm, mask_to_sdf
 from .geometry.boundary_corruption import make_local_boundary_corruption
 from .geometry.ray_sampler import sample_along_normals
-from .losses import boundary_recovery_loss, cross_supervision_loss, diagnostics_from_probs, minimal_transport_loss, weighted_bce_prob
+from .losses import boundary_recovery_loss, cross_supervision_loss, diagnostics_from_probs, minimal_transport_loss, router_fusion_loss, weighted_bce_prob
 from .routing import DisagreementRouter
 from .shared_voxtell import SharedEncoderOnce, trainable_parameter_summary
 from .teacher import EMATeacher
@@ -137,6 +137,8 @@ class DHGAStageTrainer:
                         param.requires_grad_(True)
             for param in self.model.appearance_expert.parameters():
                 param.requires_grad_(True)
+            for param in self.model.router.parameters():
+                param.requires_grad_(True)
         elif stage == "C":
             for param in self.model.geometry_head.parameters():
                 param.requires_grad_(True)
@@ -167,6 +169,7 @@ class DHGAStageTrainer:
                 self.teacher if self.teacher is not None else None,
                 self.scaler,
                 load_training_state=True,
+                expected_stage=self.config.dhga_stage,
             )
             self.start_epoch = int(payload.get("epoch", 0))
             self.global_step = int(payload.get("global_step", 0))
@@ -230,6 +233,8 @@ class DHGAStageTrainer:
                 patch_size = tuple(int(v) for v in self.predictor.patch_size)
                 slicers = self.predictor._internal_get_sliding_window_slicers(volume.shape[1:])
                 random.shuffle(slicers)
+                if self.config.dhga_stage in {"C", "D"}:
+                    slicers = self._teacher_boundary_guided_slicers(volume, spacing, slicers)
                 if self.config.steps_per_volume > 0:
                     slicers = slicers[: self.config.steps_per_volume]
                 for slicer in slicers:
@@ -287,6 +292,25 @@ class DHGAStageTrainer:
             return self._stage_d(patch, spacing)
         raise ValueError(f"Unsupported stage {stage}")
 
+    def _teacher_boundary_guided_slicers(self, volume, spacing: tuple[float, float, float], slicers: list) -> list:
+        if not slicers or self.config.steps_per_volume <= 0:
+            return slicers
+        candidate_count = min(len(slicers), max(self.config.steps_per_volume * 4, self.config.steps_per_volume))
+        candidates = slicers[:candidate_count]
+        scored = []
+        with torch.no_grad():
+            for slicer in candidates:
+                patch = torch.as_tensor(volume[slicer][None], device=self.device, dtype=torch.float32)
+                out = self._teacher_forward(patch, spacing, run_geometry=False)
+                sdf = mask_to_sdf(out.router.fused_prob.detach() >= self.config.pred_threshold, spacing)
+                band = (sdf.abs() <= self.config.dhga_surface_tolerance_mm * 2.0).float()
+                score = float((band * out.router.geometry_disagreement_weight.detach().clamp_min(0.05)).mean().cpu())
+                scored.append((score, slicer))
+        scored.sort(key=lambda item: item[0], reverse=True)
+        selected = [slicer for _, slicer in scored]
+        selected.extend(slicer for slicer in slicers[candidate_count:] if slicer not in selected)
+        return selected
+
     def _teacher_forward(self, patch: Tensor, spacing: tuple[float, float, float], run_geometry: bool = False):
         module = self.model
         was_training = module.training
@@ -319,10 +343,12 @@ class DHGAStageTrainer:
         sem_from_teacher_app = weighted_bce_prob(strong_out.semantic_prob, teacher_out.appearance_prob.detach(), weight)
         app_from_teacher_sem = weighted_bce_prob(strong_out.appearance_prob, teacher_out.semantic_prob.detach(), weight)
         cross = 0.5 * (sem_from_teacher_app + app_from_teacher_sem)
+        router_loss = router_fusion_loss(strong_out.router, 0.5 * (teacher_out.semantic_prob + teacher_out.appearance_prob), weight)
         loss = (
             self.config.dhga_anchor_weight * anchor_loss
             + self.config.dhga_weak_strong_weight * weak_strong
             + self.config.dhga_cross_supervision_weight * cross
+            + 0.1 * router_loss
         )
         metrics = diagnostics_from_probs(strong_out.semantic_prob, strong_out.appearance_prob, teacher_out.router)
         metrics.update({
@@ -330,6 +356,7 @@ class DHGAStageTrainer:
             "dhga_anchor_loss": float(anchor_loss.detach().cpu()),
             "dhga_weak_strong_loss": float(weak_strong.detach().cpu()),
             "dhga_cross_supervision_loss": float(cross.detach().cpu()),
+            "dhga_router_fusion_loss": float(router_loss.detach().cpu()),
         })
         return loss, metrics
 
@@ -378,7 +405,7 @@ class DHGAStageTrainer:
 
     def _stage_d(self, patch: Tensor, spacing: tuple[float, float, float]) -> tuple[Tensor, dict[str, float]]:
         out = self.model(patch, spacing, run_geometry=True)
-        cross = cross_supervision_loss(out.semantic_prob, out.appearance_prob, out.router)
+        cross = router_fusion_loss(out.router, 0.5 * (out.semantic_prob + out.appearance_prob), out.router.cross_supervision_weight)
         displacement = out.geometry.get("sparse_displacement_mm", patch.new_zeros(1))
         minimal = minimal_transport_loss(displacement)
         recovery, recovery_metrics = self._stage_c(patch, spacing)

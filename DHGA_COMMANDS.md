@@ -18,6 +18,14 @@ conda run -n voxtell python run_3d_dhga.py \
 conda run -n voxtell python -m unittest tests.test_dhga_static
 ```
 
+## Static Checks
+
+```bash
+conda run -n voxtell python -m py_compile \
+  run_3d_dhga.py dhga/*.py dhga/experts/*.py dhga/geometry/*.py \
+  dhga/routing/*.py voxtell_sfda/*.py tests/test_dhga_static.py
+```
+
 ## Dry Run
 
 ```bash
@@ -36,7 +44,7 @@ Append these to real Stage A/B/C/D training commands.
   --voxtell_repo /data/zy/VoxTell_from_disk \
   --model_dir /data/zy/VoxTell_from_disk/model \
   --data_dir /data/zy/CT_MRI_DATA_3D/images/P0 \
-  --split_manifest /data/zy/MLMP/worst_zeroshot_split_p0/worst_zeroshot_split.json \
+  --split_manifest /data/zy/DHGA/worst_zeroshot_split_p0/worst_zeroshot_split.json \
   --sequences P0 \
   --prompts liver \
   --prompt_templates "{}" \
@@ -57,7 +65,7 @@ CUDA_VISIBLE_DEVICES=0 conda run -n voxtell python run_3d_dhga.py \
   --voxtell_repo /data/zy/VoxTell_from_disk \
   --model_dir /data/zy/VoxTell_from_disk/model \
   --data_dir /data/zy/CT_MRI_DATA_3D/images/P0 \
-  --split_manifest /data/zy/MLMP/worst_zeroshot_split_p0/worst_zeroshot_split.json \
+  --split_manifest /data/zy/DHGA/worst_zeroshot_split_p0/worst_zeroshot_split.json \
   --sequences P0 \
   --prompts liver \
   --prompt_templates "{}" \
@@ -80,11 +88,12 @@ CUDA_VISIBLE_DEVICES=0 conda run -n voxtell python run_3d_dhga.py \
   --dhga_anchor_weight 0.25 \
   --dhga_cross_supervision_weight 1.0 \
   --dhga_weak_strong_weight 0.5 \
+  --dhga_prompt_ranking_weight 0 \
   --save_dir .save/dhga/stage_b \
   --voxtell_repo /data/zy/VoxTell_from_disk \
   --model_dir /data/zy/VoxTell_from_disk/model \
   --data_dir /data/zy/CT_MRI_DATA_3D/images/P0 \
-  --split_manifest /data/zy/MLMP/worst_zeroshot_split_p0/worst_zeroshot_split.json \
+  --split_manifest /data/zy/DHGA/worst_zeroshot_split_p0/worst_zeroshot_split.json \
   --sequences P0 \
   --prompts liver \
   --prompt_templates "{}" \
@@ -114,7 +123,7 @@ CUDA_VISIBLE_DEVICES=0 conda run -n voxtell python run_3d_dhga.py \
   --voxtell_repo /data/zy/VoxTell_from_disk \
   --model_dir /data/zy/VoxTell_from_disk/model \
   --data_dir /data/zy/CT_MRI_DATA_3D/images/P0 \
-  --split_manifest /data/zy/MLMP/worst_zeroshot_split_p0/worst_zeroshot_split.json \
+  --split_manifest /data/zy/DHGA/worst_zeroshot_split_p0/worst_zeroshot_split.json \
   --sequences P0 \
   --prompts liver \
   --prompt_templates "{}" \
@@ -138,7 +147,7 @@ CUDA_VISIBLE_DEVICES=0 conda run -n voxtell python run_3d_dhga.py \
   --voxtell_repo /data/zy/VoxTell_from_disk \
   --model_dir /data/zy/VoxTell_from_disk/model \
   --data_dir /data/zy/CT_MRI_DATA_3D/images/P0 \
-  --split_manifest /data/zy/MLMP/worst_zeroshot_split_p0/worst_zeroshot_split.json \
+  --split_manifest /data/zy/DHGA/worst_zeroshot_split_p0/worst_zeroshot_split.json \
   --sequences P0 \
   --prompts liver \
   --prompt_templates "{}" \
@@ -149,17 +158,17 @@ CUDA_VISIBLE_DEVICES=0 conda run -n voxtell python run_3d_dhga.py \
 
 ## Evaluation-Only Sliding Prediction
 
-This path reads GT only when `--val_label_dir` is supplied, and only for reporting metrics. It aggregates semantic/app probabilities and VoxTell visual features in crop space, applies one SDF geometry correction, restores original space, and saves NIfTI masks.
+This path reads GT only when `--val_label_dir` is supplied, and only for reporting metrics. It aggregates semantic/app probabilities and VoxTell visual features in crop space, applies one SDF geometry correction, restores original space, saves NIfTI masks, and reports Dice, IoU, precision, recall, FP/FN voxels, volume ratio, and connected components.
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 conda run -n voxtell python run_3d_dhga.py \
-  --evaluate_only \
+  --evaluation_only \
   --init_checkpoint .save/dhga/stage_d/checkpoint_final.pt \
   --save_dir .save/dhga/eval_only \
   --voxtell_repo /data/zy/VoxTell_from_disk \
   --model_dir /data/zy/VoxTell_from_disk/model \
   --data_dir /data/zy/CT_MRI_DATA_3D/images/P0 \
-  --split_manifest /data/zy/MLMP/worst_zeroshot_split_p0/worst_zeroshot_split.json \
+  --split_manifest /data/zy/DHGA/worst_zeroshot_split_p0/worst_zeroshot_split.json \
   --sequences P0 \
   --prompts liver \
   --val_label_dir /data/zy/CT_MRI_DATA_3D/labels/P0 \
@@ -181,12 +190,31 @@ CUDA_VISIBLE_DEVICES=0 conda run -n voxtell python run_3d_dhga.py \
   --voxtell_repo /data/zy/VoxTell_from_disk \
   --model_dir /data/zy/VoxTell_from_disk/model \
   --data_dir /data/zy/CT_MRI_DATA_3D/images/P0 \
-  --split_manifest /data/zy/MLMP/worst_zeroshot_split_p0/worst_zeroshot_split.json \
+  --split_manifest /data/zy/DHGA/worst_zeroshot_split_p0/worst_zeroshot_split.json \
   --sequences P0 \
   --prompts liver \
   --device cuda \
   --epochs 10 \
   --steps_per_volume 2
+```
+
+## Predict/Test Alias
+
+Use this when GT metrics are not needed. `--predict`, `--test`, `--evaluate_only`, and `--evaluation_only` enter the same inference-only path.
+
+```bash
+CUDA_VISIBLE_DEVICES=0 conda run -n voxtell python run_3d_dhga.py \
+  --predict \
+  --init_checkpoint .save/dhga/stage_d/checkpoint_final.pt \
+  --save_dir .save/dhga/predict \
+  --voxtell_repo /data/zy/VoxTell_from_disk \
+  --model_dir /data/zy/VoxTell_from_disk/model \
+  --data_dir /data/zy/CT_MRI_DATA_3D/images/P0 \
+  --split_manifest /data/zy/DHGA/worst_zeroshot_split_p0/worst_zeroshot_split.json \
+  --sequences P0 \
+  --prompts liver \
+  --device cuda \
+  --max_cases 1
 ```
 
 ## Focused Geometry Tests

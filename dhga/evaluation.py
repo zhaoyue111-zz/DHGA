@@ -50,14 +50,41 @@ class DHGAEvaluator:
         for path in tqdm(paths, desc="DHGA evaluation-only", dynamic_ncols=True):
             probs, image_props = self.predict_case(path)
             pred = probs[0] >= self.config.pred_threshold
-            row = {"case": path.name, "pred_voxels": int(pred.sum())}
+            row = {"case": path.name, "pred_voxels": int(pred.sum()), **getattr(self, "last_case_diagnostics", {})}
             if self.label_dir:
                 label_path = match_label_path(path, self.label_dir)
                 label, _ = self.reader.read_seg(str(label_path))
                 label = np.asarray(label[0] if label.ndim == 4 else label)
                 gt = label == int(self.label_values[0])
                 dice, iou = foreground_dice_iou(pred, gt)
-                row.update({"dice": dice, "iou": iou, "gt_voxels": int(gt.sum())})
+                sem_pred = getattr(self, "last_semantic_pred", pred)
+                app_pred = getattr(self, "last_appearance_pred", pred)
+                oracle_union = np.logical_or(sem_pred, app_pred)
+                oracle_intersection = np.logical_and(sem_pred, app_pred)
+                oracle_union_dice, oracle_union_iou = foreground_dice_iou(oracle_union, gt)
+                oracle_intersection_dice, oracle_intersection_iou = foreground_dice_iou(oracle_intersection, gt)
+                tp = int(np.logical_and(pred, gt).sum())
+                fp = int(np.logical_and(pred, ~gt).sum())
+                fn = int(np.logical_and(~pred, gt).sum())
+                precision = tp / max(tp + fp, 1)
+                recall = tp / max(tp + fn, 1)
+                gt_voxels = int(gt.sum())
+                pred_voxels = int(pred.sum())
+                row.update({
+                    "dice": dice,
+                    "iou": iou,
+                    "precision": float(precision),
+                    "recall": float(recall),
+                    "fp_voxels": fp,
+                    "fn_voxels": fn,
+                    "gt_voxels": gt_voxels,
+                    "pred_gt_volume_ratio": float(pred_voxels / max(gt_voxels, 1)),
+                    "connected_components": connected_components_3d(pred),
+                    "oracle_union_dice": oracle_union_dice,
+                    "oracle_union_iou": oracle_union_iou,
+                    "oracle_intersection_dice": oracle_intersection_dice,
+                    "oracle_intersection_iou": oracle_intersection_iou,
+                })
             rows.append(row)
             out_name = path.name.replace(".nii.gz", "").replace(".nii", "") + "_dhga.nii.gz"
             self.reader.write_seg(pred.astype(np.uint8), str(self.save_dir / out_name), image_props)
@@ -99,6 +126,21 @@ class DHGAEvaluator:
             app_prob = app_sum / count.clamp_min(1)
             visual_feature = visual_sum / count.clamp_min(1)
             router = self.model.router(sem_prob, app_prob)
+            self.last_semantic_pred = (sem_prob >= self.config.pred_threshold).cpu().numpy()[0, 0]
+            self.last_appearance_pred = (app_prob >= self.config.pred_threshold).cpu().numpy()[0, 0]
+            sem_mask = sem_prob >= self.config.pred_threshold
+            app_mask = app_prob >= self.config.pred_threshold
+            sem_only = sem_mask & ~app_mask
+            app_only = app_mask & ~sem_mask
+            union = sem_mask | app_mask
+            self.last_case_diagnostics = {
+                "semantic_appearance_complement_rate": float((sem_only | app_only).float().sum().cpu() / union.float().sum().clamp_min(1.0).cpu()),
+                "semantic_only_voxels": int(sem_only.sum().cpu()),
+                "appearance_only_voxels": int(app_only.sum().cpu()),
+                "disagreement_mean": float(router.disagreement.mean().cpu()),
+                "disagreement_voxel_rate": float((router.disagreement > 0.5).float().mean().cpu()),
+                "geometry_gate_mean": float(router.w_geo.mean().cpu()),
+            }
             geometry = self.model.run_geometry(
                 data_t,
                 sem_prob,
@@ -118,3 +160,30 @@ class DHGAEvaluator:
         reverted = np.zeros((final.shape[0], *orig_shape), dtype=np.float32)
         reverted = self.insert_crop_into_image(reverted, final, bbox)
         return reverted, props
+
+
+def connected_components_3d(mask: np.ndarray) -> int:
+    try:
+        from scipy import ndimage
+
+        _, count = ndimage.label(mask.astype(bool))
+        return int(count)
+    except Exception:
+        mask = mask.astype(bool)
+        visited = np.zeros(mask.shape, dtype=bool)
+        count = 0
+        for start in np.argwhere(mask):
+            z, y, x = (int(v) for v in start)
+            if visited[z, y, x]:
+                continue
+            count += 1
+            stack = [(z, y, x)]
+            visited[z, y, x] = True
+            while stack:
+                cz, cy, cx = stack.pop()
+                for dz, dy, dx in ((1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)):
+                    nz, ny, nx = cz + dz, cy + dy, cx + dx
+                    if 0 <= nz < mask.shape[0] and 0 <= ny < mask.shape[1] and 0 <= nx < mask.shape[2] and mask[nz, ny, nx] and not visited[nz, ny, nx]:
+                        visited[nz, ny, nx] = True
+                        stack.append((nz, ny, nx))
+        return count

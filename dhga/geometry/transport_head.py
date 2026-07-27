@@ -35,8 +35,11 @@ class GeometryTransportHead(nn.Module):
             any_valid = flat_valid.any(dim=-1, keepdim=True)
             flat_valid = torch.where(any_valid, flat_valid, torch.zeros_like(flat_valid).scatter(1, torch.full((flat_valid.shape[0], 1), self.center_index, device=flat_valid.device), True))
             logits = logits.masked_fill(~flat_valid, -1e4)
+        else:
+            any_valid = torch.ones((bsz * n_points, 1), device=ray_tokens.device, dtype=torch.bool)
         probs = F.softmax(logits, dim=-1).view(bsz, n_points, n_offsets)
         offsets = self.offsets_mm.to(device=ray_tokens.device, dtype=ray_tokens.dtype)
         expected = (probs * offsets.view(1, 1, -1)).sum(dim=-1)
+        expected = torch.where(any_valid.view(bsz, n_points), expected, torch.zeros_like(expected))
         entropy = -(probs * probs.clamp_min(1e-8).log()).sum(dim=-1)
-        return {"logits": logits.view(bsz, n_points, n_offsets), "prob": probs, "expected_displacement_mm": expected, "entropy": entropy}
+        return {"logits": logits.view(bsz, n_points, n_offsets), "prob": probs, "expected_displacement_mm": expected, "entropy": entropy, "valid_points": any_valid.view(bsz, n_points)}

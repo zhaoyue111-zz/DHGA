@@ -44,14 +44,23 @@ class DisagreementRouter(nn.Module):
         self.background_quantile = background_quantile
         self.disagreement_quantile = disagreement_quantile
         self.spatial_head = nn.Sequential(
-            nn.Conv3d(5, 8, kernel_size=3, padding=1),
+            nn.Conv3d(6, 8, kernel_size=3, padding=1),
             nn.GELU(),
             nn.Conv3d(8, 3, kernel_size=1),
         )
         nn.init.zeros_(self.spatial_head[-1].weight)
         nn.init.zeros_(self.spatial_head[-1].bias)
+        with torch.no_grad():
+            self.spatial_head[-1].bias[:] = torch.tensor([0.0, 0.0, -3.0])
 
-    def forward(self, sem_prob: Tensor, app_prob: Tensor, sem_stability: Tensor | None = None, app_stability: Tensor | None = None) -> RouterOutput:
+    def forward(
+        self,
+        sem_prob: Tensor,
+        app_prob: Tensor,
+        sem_stability: Tensor | None = None,
+        app_stability: Tensor | None = None,
+        visual_context: Tensor | None = None,
+    ) -> RouterOutput:
         if sem_prob.shape != app_prob.shape:
             raise ValueError(f"expert probability shapes differ: {sem_prob.shape} vs {app_prob.shape}")
         disagreement = (sem_prob - app_prob).abs()
@@ -73,7 +82,13 @@ class DisagreementRouter(nn.Module):
             disagreement_weight = disagreement.clamp(0, 1)
         else:
             raise ValueError("normalization must be case_rank or none")
-        route_features = torch.cat([sem_prob, app_prob, disagreement_weight, stable_foreground, stable_background], dim=1)
+        if visual_context is None:
+            visual_context = torch.zeros_like(sem_prob)
+        elif visual_context.shape[-3:] != sem_prob.shape[-3:]:
+            visual_context = torch.nn.functional.interpolate(visual_context, size=sem_prob.shape[-3:], mode="trilinear", align_corners=False)
+        if visual_context.shape[1] != 1:
+            visual_context = visual_context.mean(dim=1, keepdim=True)
+        route_features = torch.cat([sem_prob, app_prob, disagreement_weight, stable_foreground, stable_background, visual_context], dim=1)
         weights = self.spatial_head(route_features).softmax(dim=1)
         w_sem = weights[:, 0:1]
         w_app = weights[:, 1:2]
