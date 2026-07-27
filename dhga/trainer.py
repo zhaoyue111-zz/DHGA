@@ -118,6 +118,7 @@ class DHGAStageTrainer:
         self.global_step = 0
         self._load_initial_or_resume()
         self._init_io()
+        self.writer = self._init_tensorboard()
         print(json.dumps(self.model.trainable_summary(), indent=2))
 
     def _build_optimizer(self) -> torch.optim.Optimizer:
@@ -192,6 +193,20 @@ class DHGAStageTrainer:
         self.reader = NibabelIOWithReorient()
         self.pad_nd_image = pad_nd_image
 
+    def _init_tensorboard(self):
+        if not self.config.tensorboard_enabled:
+            return None
+        try:
+            from torch.utils.tensorboard import SummaryWriter
+        except Exception as exc:
+            print(f"TensorBoard disabled: {exc}")
+            return None
+        log_dir = self.save_dir / "tensorboard"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        writer = SummaryWriter(log_dir=str(log_dir))
+        writer.add_text("dhga/config", json.dumps(self.config.to_dict(), indent=2), 0)
+        return writer
+
     def _load_train_paths(self) -> list[Path]:
         if not self.config.split_manifest or not self.config.data_dir:
             raise ValueError("Real DHGA training requires --split_manifest and --data_dir")
@@ -226,47 +241,58 @@ class DHGAStageTrainer:
         train_paths = self._load_train_paths()
         history = []
         self.model.train()
-        for epoch in tqdm(range(self.start_epoch, self.config.epochs), desc=f"DHGA Stage {self.config.dhga_stage}", dynamic_ncols=True):
-            random.shuffle(train_paths)
-            for path in train_paths:
-                volume, spacing = self._load_volume(path)
-                patch_size = tuple(int(v) for v in self.predictor.patch_size)
-                slicers = self.predictor._internal_get_sliding_window_slicers(volume.shape[1:])
-                random.shuffle(slicers)
-                if self.config.dhga_stage in {"C", "D"}:
-                    slicers = self._teacher_boundary_guided_slicers(volume, spacing, slicers)
-                if self.config.steps_per_volume > 0:
-                    slicers = slicers[: self.config.steps_per_volume]
-                for slicer in slicers:
-                    patch = torch.clone(volume[slicer][None], memory_format=torch.contiguous_format).to(self.device)
-                    if self.config.dhga_stage == "A":
-                        with torch.no_grad():
-                            loss, metrics = self.training_step(patch, spacing=spacing)
-                    else:
-                        with torch.autocast(self.device.type, enabled=self.config.amp and self.device.type == "cuda"):
-                            loss, metrics = self.training_step(patch, spacing=spacing)
-                        self.optimizer.zero_grad(set_to_none=True)
-                        self.scaler.scale(loss).backward()
-                        self.scaler.unscale_(self.optimizer)
-                        torch.nn.utils.clip_grad_norm_([p for p in self.model.parameters() if p.requires_grad], 1.0)
-                        self.scaler.step(self.optimizer)
-                        self.scaler.update()
-                        self.global_step += 1
-                        if self.teacher is not None:
-                            self.teacher.update(self.model)
-                    record = {"epoch": epoch + 1, "case": str(path), **metrics}
-                    history.append(record)
-            save_training_checkpoint(
-                self.save_dir / "checkpoint_last.pt",
-                self.model,
-                self.config,
-                optimizer=self.optimizer,
-                ema=self.teacher if self.teacher is not None else None,
-                scaler=self.scaler,
-                epoch=epoch + 1,
-                global_step=self.global_step,
-                metadata={"stage": self.config.dhga_stage},
-            )
+        try:
+            for epoch in tqdm(range(self.start_epoch, self.config.epochs), desc=f"DHGA Stage {self.config.dhga_stage}", dynamic_ncols=True):
+                random.shuffle(train_paths)
+                epoch_total = len(train_paths) * self.config.steps_per_volume if self.config.steps_per_volume > 0 else None
+                with tqdm(total=epoch_total, desc=f"epoch {epoch + 1}/{self.config.epochs}", dynamic_ncols=True, leave=False) as patch_bar:
+                    for path in train_paths:
+                        volume, spacing = self._load_volume(path)
+                        patch_size = tuple(int(v) for v in self.predictor.patch_size)
+                        slicers = self.predictor._internal_get_sliding_window_slicers(volume.shape[1:])
+                        random.shuffle(slicers)
+                        if self.config.dhga_stage in {"C", "D"}:
+                            slicers = self._teacher_boundary_guided_slicers(volume, spacing, slicers)
+                        if self.config.steps_per_volume > 0:
+                            slicers = slicers[: self.config.steps_per_volume]
+                        for slicer in slicers:
+                            patch = torch.clone(volume[slicer][None], memory_format=torch.contiguous_format).to(self.device)
+                            if self.config.dhga_stage == "A":
+                                with torch.no_grad():
+                                    loss, metrics = self.training_step(patch, spacing=spacing)
+                            else:
+                                with torch.autocast(self.device.type, enabled=self.config.amp and self.device.type == "cuda"):
+                                    loss, metrics = self.training_step(patch, spacing=spacing)
+                                self.optimizer.zero_grad(set_to_none=True)
+                                self.scaler.scale(loss).backward()
+                                self.scaler.unscale_(self.optimizer)
+                                torch.nn.utils.clip_grad_norm_([p for p in self.model.parameters() if p.requires_grad], 1.0)
+                                self.scaler.step(self.optimizer)
+                                self.scaler.update()
+                                self.global_step += 1
+                                if self.teacher is not None:
+                                    self.teacher.update(self.model)
+                            record = {"epoch": epoch + 1, "case": str(path), **metrics}
+                            history.append(record)
+                            log_step = self.global_step if self.config.dhga_stage != "A" else len(history)
+                            self._log_tensorboard_scalars(metrics, log_step)
+                            self._maybe_log_visual_masks(patch, spacing, log_step)
+                            patch_bar.set_postfix({"loss": f"{float(metrics.get('loss', 0.0)):.4f}", "case": Path(path).name[:18]})
+                            patch_bar.update(1)
+                save_training_checkpoint(
+                    self.save_dir / "checkpoint_last.pt",
+                    self.model,
+                    self.config,
+                    optimizer=self.optimizer,
+                    ema=self.teacher if self.teacher is not None else None,
+                    scaler=self.scaler,
+                    epoch=epoch + 1,
+                    global_step=self.global_step,
+                    metadata={"stage": self.config.dhga_stage},
+                )
+        finally:
+            if self.writer is not None:
+                self.writer.flush()
         save_training_checkpoint(
             self.save_dir / "checkpoint_final.pt",
             self.model,
@@ -279,6 +305,47 @@ class DHGAStageTrainer:
             metadata={"stage": self.config.dhga_stage, "history": history[-256:]},
         )
         (self.save_dir / "history.json").write_text(json.dumps(history, indent=2))
+        if self.writer is not None:
+            self.writer.close()
+
+    def _log_tensorboard_scalars(self, metrics: dict[str, float], step: int) -> None:
+        if self.writer is None or step % self.config.tensorboard_log_interval != 0:
+            return
+        for key, value in metrics.items():
+            if isinstance(value, (int, float)):
+                self.writer.add_scalar(f"train/{key}", float(value), step)
+        if self.optimizer is not None:
+            self.writer.add_scalar("train/lr", float(self.optimizer.param_groups[0]["lr"]), step)
+
+    def _maybe_log_visual_masks(self, patch: Tensor, spacing: tuple[float, float, float], step: int) -> None:
+        if self.writer is None or step <= 0:
+            return
+        if step != 1 and step % self.config.tensorboard_image_interval != 0:
+            return
+        was_training = self.model.training
+        self.model.eval()
+        with torch.no_grad():
+            out = self.model(patch[:1], spacing, run_geometry=False)
+        self.model.train(was_training)
+        image = patch[:1, :1].detach().float()
+        sem_mask = (out.semantic_prob[:1] >= self.config.pred_threshold).float()
+        app_mask = (out.appearance_prob[:1] >= self.config.pred_threshold).float()
+        center = image.shape[-3] // 2
+        panel = torch.cat(
+            [
+                self._normalize_image_slice(image[0, 0, center]),
+                sem_mask[0, 0, center].detach().cpu(),
+                app_mask[0, 0, center].detach().cpu(),
+            ],
+            dim=1,
+        ).unsqueeze(0)
+        self.writer.add_image("masks/image_semantic_appearance_center_z", panel, step)
+
+    def _normalize_image_slice(self, image_slice: Tensor) -> Tensor:
+        x = image_slice.detach().float().cpu()
+        lo = torch.quantile(x.flatten(), 0.01)
+        hi = torch.quantile(x.flatten(), 0.99)
+        return ((x - lo) / (hi - lo).clamp_min(1e-6)).clamp(0, 1)
 
     def training_step(self, patch: Tensor, spacing: tuple[float, float, float]) -> tuple[Tensor, dict[str, float]]:
         stage = self.config.dhga_stage

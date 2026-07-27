@@ -1,14 +1,19 @@
 from __future__ import annotations
 
 import torch
-import torch.nn.functional as F
 from torch import Tensor
 
 from dhga.routing.disagreement_router import RouterOutput
 
 
+def bce_from_prob(student_prob: Tensor, target_prob: Tensor) -> Tensor:
+    prob = student_prob.float().clamp(1e-6, 1.0 - 1e-6)
+    target = target_prob.detach().float()
+    return -(target * prob.log() + (1.0 - target) * (1.0 - prob).log())
+
+
 def weighted_bce_prob(student_prob: Tensor, teacher_prob: Tensor, weight: Tensor) -> Tensor:
-    loss = F.binary_cross_entropy(student_prob.clamp(1e-6, 1 - 1e-6), teacher_prob.detach(), reduction="none")
+    loss = bce_from_prob(student_prob, teacher_prob)
     denom = weight.detach().sum().clamp_min(1.0)
     return (loss * weight.detach()).sum() / denom
 
@@ -21,7 +26,7 @@ def cross_supervision_loss(sem_prob: Tensor, app_prob: Tensor, router: RouterOut
 
 
 def router_fusion_loss(router: RouterOutput, target_prob: Tensor, weight: Tensor | None = None) -> Tensor:
-    loss = F.binary_cross_entropy(router.fused_prob.clamp(1e-6, 1 - 1e-6), target_prob.detach(), reduction="none")
+    loss = bce_from_prob(router.fused_prob, target_prob)
     if weight is None:
         return loss.mean()
     return (loss * weight.detach()).sum() / weight.detach().sum().clamp_min(1.0)

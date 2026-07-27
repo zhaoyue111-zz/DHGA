@@ -22,6 +22,9 @@ class DHGAConfig:
     amp: bool = True
     seed: int = 0
     max_cases: int = 0
+    tensorboard_enabled: bool = True
+    tensorboard_log_interval: int = 1
+    tensorboard_image_interval: int = 50
     init_checkpoint: str = ""
     resume_checkpoint: str = ""
     dhga_ema_warmup_steps: int = 10
@@ -70,6 +73,8 @@ class DHGAConfig:
             raise ValueError("epochs and steps_per_volume must be non-negative")
         if self.lr <= 0:
             raise ValueError("lr must be positive")
+        if self.tensorboard_log_interval <= 0 or self.tensorboard_image_interval <= 0:
+            raise ValueError("tensorboard intervals must be positive")
         if self.dhga_semantic_adapter_rank <= 0:
             raise ValueError("dhga_semantic_adapter_rank must be positive")
         if self.dhga_semantic_adapter_target not in {"cross", "self", "both"}:

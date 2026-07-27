@@ -16,7 +16,7 @@ from dhga.geometry.transport_head import GeometryTransportHead
 from dhga.geometry.boundary_points import extract_boundary_points, sparse_displacements_to_dense_narrowband
 from dhga.geometry.sdf import mask_to_sdf, sdf_normals, update_sdf_with_displacement
 from dhga.inference import finalize_mask, finalize_probability
-from dhga.losses import cross_supervision_loss
+from dhga.losses import cross_supervision_loss, weighted_bce_prob
 from dhga.routing import DisagreementRouter
 from dhga.shared_voxtell import SharedEncoderOnce
 from dhga.trainer import DHGASmokeModel, run_synthetic_smoke
@@ -149,6 +149,16 @@ class DHGAStaticTests(unittest.TestCase):
         router = DisagreementRouter("none")(sem, app)
         loss = cross_supervision_loss(sem, app, router)
         self.assertLess(float(loss), 0.01)
+
+    def test_probability_bce_is_autocast_safe(self):
+        prob = torch.full((1, 1, 2, 2, 2), 0.7, requires_grad=True)
+        target = torch.ones_like(prob)
+        weight = torch.ones_like(prob)
+        with torch.autocast("cpu", enabled=True):
+            loss = weighted_bce_prob(prob, target, weight)
+        loss.backward()
+        self.assertTrue(torch.isfinite(loss))
+        self.assertIsNotNone(prob.grad)
 
     def test_router_region_probability_renormalizes_without_geo_suppression(self):
         sem = torch.ones(1, 1, 3, 3, 3) * 0.8

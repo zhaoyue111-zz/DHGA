@@ -36,22 +36,25 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--train", action="store_true", help="Launch the selected real DHGA stage trainer")
     parser.add_argument("--evaluate_only", "--evaluation_only", action="store_true", help="Run sliding-window DHGA prediction/evaluation without training")
     parser.add_argument("--predict", "--test", action="store_true", help="Alias for --evaluate_only without training")
-    parser.add_argument("--device", default=None)
+    parser.add_argument("--device", default="cuda")
     parser.add_argument("--save_dir", default=".save/dhga")
     parser.add_argument("--prompts", nargs="*", default=["liver"])
     parser.add_argument("--voxtell_repo", default="/data/zy/VoxTell_from_disk")
     parser.add_argument("--model_dir", default="/data/zy/VoxTell_from_disk/model")
-    parser.add_argument("--data_dir", default="")
-    parser.add_argument("--split_manifest", default="")
-    parser.add_argument("--sequences", default="")
+    parser.add_argument("--data_dir", default="/data/zy/CT_MRI_DATA_3D/images/P0")
+    parser.add_argument("--split_manifest", default="/data/zy/DHGA/worst_zeroshot_split_p0/worst_zeroshot_split.json")
+    parser.add_argument("--sequences", default="P0")
     parser.add_argument("--prompt_templates", nargs="*", default=["{}"])
     parser.add_argument("--text_encoding_model", default="Qwen/Qwen3-Embedding-4B")
-    parser.add_argument("--epochs", type=int, default=1)
+    parser.add_argument("--epochs", type=int, default=15)
     parser.add_argument("--steps_per_volume", type=int, default=1)
     parser.add_argument("--lr", type=float, default=1e-4)
-    parser.add_argument("--weight_decay", type=float, default=0.0)
-    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--weight_decay", type=float, default=3e-4)
+    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--max_cases", type=int, default=0)
+    parser.add_argument("--tensorboard_enabled", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--tensorboard_log_interval", type=int, default=1)
+    parser.add_argument("--tensorboard_image_interval", type=int, default=50)
     parser.add_argument("--val_label_dir", default="")
     parser.add_argument("--label_values", nargs="*", type=int, default=None)
     parser.add_argument("--init_checkpoint", default="")
@@ -136,6 +139,9 @@ def config_from_args(args: argparse.Namespace) -> DHGAConfig:
         amp=not args.no_amp,
         seed=args.seed,
         max_cases=args.max_cases,
+        tensorboard_enabled=args.tensorboard_enabled,
+        tensorboard_log_interval=args.tensorboard_log_interval,
+        tensorboard_image_interval=args.tensorboard_image_interval,
         init_checkpoint=args.init_checkpoint,
         resume_checkpoint=args.resume_checkpoint,
         dhga_enabled=args.dhga_enabled,
