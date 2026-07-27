@@ -12,6 +12,7 @@ from torch import Tensor, nn
 from torch.utils.checkpoint import checkpoint
 
 from dhga.config import DHGAConfig
+from dhga.inference import finalize_probability
 from dhga.experts import AppearanceExpert
 from dhga.geometry import (
     GeometryTransportHead,
@@ -90,6 +91,8 @@ class DHGAVoxTellModel(nn.Module):
 
     def __init__(self, network: nn.Module, text_embeddings: Tensor, config: DHGAConfig, num_classes: int, num_templates: int) -> None:
         super().__init__()
+        if config.dhga_geometry_enabled and num_classes != 1:
+            raise ValueError("Current DHGA geometry is single-class binary; pass exactly one prompt or disable geometry")
         self.network = network
         self.config = config
         self.num_classes = num_classes
@@ -188,21 +191,7 @@ class DHGAVoxTellModel(nn.Module):
     def forward(self, image: Tensor, spacing: tuple[float, float, float] = (1.0, 1.0, 1.0), run_geometry: bool = True) -> DHGAForwardOutput:
         features = self.encode_once(image, spacing)
         if not self.config.dhga_enabled:
-            with torch.no_grad(), self.lora_disabled(), self.appearance_disabled():
-                base_logits, _ = self.decode_from_features(features.encoder_stages, features.selected_feature)
-                base_prob = self._class_probs(base_logits)
-            router = self.router(base_prob, base_prob)
-            return DHGAForwardOutput(
-                semantic_logits=base_logits,
-                appearance_logits=base_logits,
-                semantic_prob=base_prob,
-                appearance_prob=base_prob,
-                anchor_prob=base_prob,
-                router=router,
-                geometry={},
-                final_prob=base_prob,
-                features=features,
-            )
+            return self.baseline_forward_from_features(features)
         semantic_logits, projected_prompt = self.decode_from_features(features.encoder_stages, features.selected_feature)
         with self.lora_disabled():
             app_features = self.appearance_expert.adapt_features(features, self.config.dhga_appearance_feature_dropout)
@@ -219,9 +208,14 @@ class DHGAVoxTellModel(nn.Module):
         final_prob = router.fused_prob
         if "dense_displacement_mm" in geometry:
             sdf = mask_to_sdf(router.fused_prob >= self.config.pred_threshold, spacing)
-            geo_prob = ((sdf - geometry["dense_displacement_mm"]) / max(self.config.dhga_ray_step_mm, 1e-6)).neg().sigmoid()
-            narrow_gate = ((sdf.abs() <= self.config.dhga_search_radius_mm) * router.w_geo).clamp(0, 1)
-            final_prob = router.fused_prob * (1.0 - narrow_gate) + geo_prob * narrow_gate
+            final_prob = finalize_probability(
+                router.fused_prob,
+                sdf,
+                geometry["dense_displacement_mm"],
+                router.w_geo,
+                self.config,
+                geometry.get("dense_valid_weight"),
+            )
         return DHGAForwardOutput(
             semantic_logits=semantic_logits,
             appearance_logits=appearance_logits,
@@ -231,6 +225,26 @@ class DHGAVoxTellModel(nn.Module):
             router=router,
             geometry=geometry,
             final_prob=final_prob,
+            features=features,
+        )
+
+    def baseline_forward(self, image: Tensor, spacing: tuple[float, float, float] = (1.0, 1.0, 1.0)) -> DHGAForwardOutput:
+        return self.baseline_forward_from_features(self.encode_once(image, spacing))
+
+    def baseline_forward_from_features(self, features: SharedVoxTellFeatures) -> DHGAForwardOutput:
+        with torch.no_grad(), self.lora_disabled(), self.appearance_disabled():
+            base_logits, _ = self.decode_from_features(features.encoder_stages, features.selected_feature)
+            base_prob = self._class_probs(base_logits)
+            router = self.router(base_prob, base_prob)
+        return DHGAForwardOutput(
+            semantic_logits=base_logits,
+            appearance_logits=base_logits,
+            semantic_prob=base_prob,
+            appearance_prob=base_prob,
+            anchor_prob=base_prob,
+            router=router,
+            geometry={},
+            final_prob=base_prob,
             features=features,
         )
 
@@ -297,6 +311,7 @@ class DHGAVoxTellModel(nn.Module):
         spacing: tuple[float, float, float],
         initial_sdf: Tensor | None = None,
         visual_feature: Tensor | None = None,
+        visual_feature_is_projected: bool = False,
         boundary_points: Tensor | None = None,
         boundary_normals: Tensor | None = None,
         valid_boundary_points: Tensor | None = None,
@@ -321,7 +336,8 @@ class DHGAVoxTellModel(nn.Module):
         sampled_sdf, valid_sdf = sample_along_normals(sdf, points, normals, offsets, spacing)
         if visual_feature is None:
             raise RuntimeError("run_geometry requires explicit visual_feature from the shared encoder")
-        visual_feature = self.geometry_visual_proj(visual_feature)
+        if not visual_feature_is_projected:
+            visual_feature = self.geometry_visual_proj(visual_feature)
         sampled_visual, valid_visual = self._sample_visual_feature(visual_feature, points, normals, offsets, spacing, tuple(image.shape[-3:]))
         valid = valid_ray & valid_sem & valid_app & valid_dis & valid_fused & valid_sdf & valid_visual & valid_points.unsqueeze(-1)
         tokens = self.ray_tokens(
@@ -336,13 +352,14 @@ class DHGAVoxTellModel(nn.Module):
             prompt_embedding,
         )
         pred = self._geometry_forward_chunked(tokens, valid)
-        dense = sparse_displacements_to_dense_narrowband(
+        dense, dense_weight = sparse_displacements_to_dense_narrowband(
             points,
             pred["expected_displacement_mm"] * self._sample_point_weight(router.geometry_disagreement_weight, points),
             valid_points,
             tuple(image.shape[-3:]),
             spacing=spacing,
             diffusion_mm=self.config.dhga_displacement_diffusion_mm,
+            return_weight=True,
         )
         return {
             "sdf": sdf,
@@ -353,6 +370,7 @@ class DHGAVoxTellModel(nn.Module):
             "ray_tokens": tokens,
             "sparse_displacement_mm": pred["expected_displacement_mm"],
             "dense_displacement_mm": dense,
+            "dense_valid_weight": dense_weight,
             "displacement_entropy": pred["entropy"],
         }
 

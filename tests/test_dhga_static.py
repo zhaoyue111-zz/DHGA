@@ -1,4 +1,7 @@
 from pathlib import Path
+from types import SimpleNamespace
+import json
+import sys
 import tempfile
 import unittest
 
@@ -6,20 +9,20 @@ import torch
 
 from dhga.checkpoint import load_dhga_checkpoint, load_training_checkpoint, save_dhga_checkpoint, save_training_checkpoint
 from dhga.config import DHGAConfig
-from dhga.experts import AppearanceExpert, SemanticExpert
+from dhga.experts import AppearanceExpert, AppearanceFeatureAdapter, SemanticExpert
 from dhga.geometry.boundary_corruption import make_bidirectional_corruption, make_local_boundary_corruption
 from dhga.geometry.ray_sampler import make_ray_offsets_mm, sample_along_normals
 from dhga.geometry.transport_head import GeometryTransportHead
 from dhga.geometry.boundary_points import extract_boundary_points, sparse_displacements_to_dense_narrowband
 from dhga.geometry.sdf import mask_to_sdf, sdf_normals, update_sdf_with_displacement
-from dhga.inference import finalize_mask
+from dhga.inference import finalize_mask, finalize_probability
 from dhga.losses import cross_supervision_loss
 from dhga.routing import DisagreementRouter
 from dhga.shared_voxtell import SharedEncoderOnce
 from dhga.trainer import DHGASmokeModel, run_synthetic_smoke
 from dhga.trainer import DHGAStageTrainer
 from dhga.teacher import EMATeacher
-from dhga.evaluation import connected_components_3d, spacing_from_reader_properties
+from dhga.evaluation import compute_binary_case_metrics, connected_components_3d, spacing_from_reader_properties
 
 
 class DHGAStaticTests(unittest.TestCase):
@@ -48,6 +51,22 @@ class DHGAStaticTests(unittest.TestCase):
         self.assertEqual(normals.shape, (1, 32, 3))
         dense = sparse_displacements_to_dense_narrowband(points, torch.ones(1, 32), valid, (7, 7, 7), spacing=(1.0, 1.0, 2.0), diffusion_mm=2.0)
         self.assertGreater(float(dense.abs().sum()), 0.0)
+
+    def test_sparse_to_dense_uses_scatter_add_for_duplicate_indices(self):
+        points = torch.tensor([[[2.0, 2.0, 2.0], [2.0, 2.0, 2.0]]])
+        disp = torch.tensor([[1.0, 3.0]])
+        valid = torch.tensor([[True, True]])
+        dense, weight = sparse_displacements_to_dense_narrowband(
+            points,
+            disp,
+            valid,
+            (5, 5, 5),
+            spacing=(1.0, 1.0, 1.0),
+            diffusion_mm=0.1,
+            return_weight=True,
+        )
+        self.assertAlmostEqual(float(dense[0, 0, 2, 2, 2]), 2.0, places=5)
+        self.assertAlmostEqual(float(weight[0, 0, 2, 2, 2]), 2.0, places=5)
 
     def test_empty_or_full_mask_has_no_boundary(self):
         sdf = mask_to_sdf(torch.zeros(1, 1, 5, 5, 5, dtype=torch.bool))
@@ -99,6 +118,21 @@ class DHGAStaticTests(unittest.TestCase):
         app(features, torch.randn(1, 1, 4, 4, 4))
         self.assertEqual(shared.num_calls, 1)
 
+    def test_appearance_adapter_groupnorm_explicit_selected_index_and_single_dropout(self):
+        adapter = AppearanceFeatureAdapter(4, hidden_ratio=0.5, dropout=0.5)
+        self.assertFalse(any(isinstance(module, torch.nn.InstanceNorm3d) for module in adapter.modules()))
+        self.assertFalse(any(isinstance(module, torch.nn.Dropout3d) for module in adapter.modules()))
+        features = SharedEncoderOnce(torch.nn.Conv3d(1, 4, 1))(torch.randn(1, 1, 3, 3, 3))
+        features = features.__class__(
+            image=features.image,
+            encoder_stages=[features.encoder_stages[0], features.encoder_stages[0] + 1.0],
+            selected_feature=features.encoder_stages[0],
+            metadata={"selected_feature_idx": 1},
+        )
+        expert = AppearanceExpert([4, 4], [1], dropout=0.0)
+        adapted = expert.adapt_features(features, feature_dropout=0.0)
+        self.assertIs(adapted.selected_feature, adapted.encoder_stages[1])
+
     def test_expert_trainable_sets_are_distinct(self):
         config = DHGAConfig()
         model = DHGASmokeModel(config)
@@ -149,6 +183,44 @@ class DHGAStaticTests(unittest.TestCase):
         final = finalize_mask(prob, torch.zeros_like(prob), config)
         self.assertTrue(torch.equal(initial, final))
 
+    def test_unified_finalize_restores_region_when_gate_or_displacement_zero(self):
+        config = DHGAConfig(dhga_geometry_enabled=True)
+        region = torch.rand(1, 1, 4, 4, 4)
+        sdf = torch.randn_like(region)
+        displaced = finalize_probability(region, sdf, torch.ones_like(region), torch.zeros_like(region), config)
+        self.assertTrue(torch.equal(displaced, region))
+        displaced = finalize_probability(region, sdf, torch.zeros_like(region), torch.ones_like(region), config)
+        self.assertTrue(torch.equal(displaced, region))
+
+    def test_config_json_explicit_cli_overrides(self):
+        import run_3d_dhga
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.json"
+            path.write_text(json.dumps(DHGAConfig(dhga_stage="B", epochs=1, data_dir="json_data").to_dict()))
+            old_argv = sys.argv
+            try:
+                sys.argv = [
+                    "run_3d_dhga.py",
+                    "--config_json",
+                    str(path),
+                    "--dhga_stage",
+                    "C",
+                    "--epochs",
+                    "7",
+                    "--data_dir",
+                    "cli_data",
+                    "--no_amp",
+                ]
+                args = run_3d_dhga.parse_args()
+                config = run_3d_dhga.config_from_args(args)
+            finally:
+                sys.argv = old_argv
+        self.assertEqual(config.dhga_stage, "C")
+        self.assertEqual(config.epochs, 7)
+        self.assertEqual(config.data_dir, "cli_data")
+        self.assertFalse(config.amp)
+
     def test_checkpoint_strict_roundtrip(self):
         config = DHGAConfig()
         model = DHGASmokeModel(config)
@@ -195,6 +267,68 @@ class DHGAStaticTests(unittest.TestCase):
         self.assertTrue(ema.names)
         self.assertTrue(all(name.startswith("router.") for name in ema.names))
 
+    def test_ema_teacher_hard_sync_after_init_checkpoint(self):
+        model = DHGASmokeModel(DHGAConfig())
+        for param in model.parameters():
+            param.requires_grad_(False)
+        for param in model.router.parameters():
+            param.requires_grad_(True)
+        ema = EMATeacher(model, decay=0.99)
+        with torch.no_grad():
+            for param in model.router.parameters():
+                param.add_(10.0)
+        ema.sync_from(model)
+        params = dict(model.named_parameters())
+        for name in ema.names:
+            self.assertTrue(torch.allclose(ema.shadow[name], params[name]))
+
+    def test_stage_c_loss_combination_applies_weights_once(self):
+        trainer = DHGAStageTrainer.__new__(DHGAStageTrainer)
+        trainer.config = DHGAConfig(dhga_boundary_recovery_weight=2.0, dhga_minimal_transport_weight=3.0)
+        recovery = torch.tensor(5.0)
+        minimal = torch.tensor(7.0)
+        self.assertEqual(float(trainer._combine_stage_c_loss(recovery, minimal)), 31.0)
+
+    def test_stage_d_router_target_loss_backpropagates_to_router(self):
+        router = DisagreementRouter("none")
+        sem = torch.rand(1, 1, 4, 4, 4)
+        app = torch.rand_like(sem)
+        student = SimpleNamespace(router=router(sem, app))
+        teacher = SimpleNamespace(
+            semantic_prob=sem.detach(),
+            appearance_prob=app.detach(),
+            anchor_prob=(0.5 * (sem + app)).detach(),
+            router=router(sem.detach(), app.detach()),
+        )
+        trainer = DHGAStageTrainer.__new__(DHGAStageTrainer)
+        loss = trainer._stage_d_router_target_loss(student, teacher)
+        loss.backward()
+        grads = [param.grad for param in router.parameters() if param.requires_grad]
+        self.assertTrue(any(grad is not None and bool((grad.abs() > 0).any()) for grad in grads))
+
+    def test_stage_a_uses_baseline_forward(self):
+        class FakeBaseline(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.called = False
+
+            def baseline_forward(self, patch, spacing):
+                self.called = True
+                prob = torch.full((1, 1, 2, 2, 2), 0.5)
+                return SimpleNamespace(
+                    semantic_prob=prob,
+                    appearance_prob=prob,
+                    anchor_prob=prob,
+                    router=DisagreementRouter("none")(prob, prob),
+                )
+
+        trainer = DHGAStageTrainer.__new__(DHGAStageTrainer)
+        trainer.model = FakeBaseline()
+        loss, metrics = trainer._stage_a(torch.zeros(1, 1, 2, 2, 2), (1.0, 1.0, 1.0))
+        self.assertTrue(trainer.model.called)
+        self.assertEqual(float(loss), 0.0)
+        self.assertEqual(metrics["dhga_stage_a_forced_baseline"], 1.0)
+
     def test_stage_trainable_parameter_sets(self):
         class FakeLoRA(torch.nn.Module):
             def __init__(self):
@@ -234,6 +368,7 @@ class DHGAStaticTests(unittest.TestCase):
         out = head(tokens, valid)
         self.assertEqual(float(out["expected_displacement_mm"].detach().abs().max()), 0.0)
         self.assertFalse(bool(out["valid_points"].any()))
+        self.assertEqual(float(out["entropy"].detach().abs().max()), 0.0)
 
     def test_geometry_chunk_matches_full(self):
         offsets = make_ray_offsets_mm(2.0, 1.0)
@@ -253,6 +388,35 @@ class DHGAStaticTests(unittest.TestCase):
         mask[0, 0, 0] = True
         mask[4, 4, 4] = True
         self.assertEqual(connected_components_3d(mask), 2)
+
+    def test_synthetic_evaluation_metrics_complete(self):
+        import numpy as np
+
+        gt = np.zeros((3, 3, 3), dtype=bool)
+        pred = np.zeros_like(gt)
+        sem = np.zeros_like(gt)
+        app = np.zeros_like(gt)
+        gt[1, 1, 1] = True
+        pred[1, 1, 1] = True
+        pred[0, 0, 0] = True
+        sem[1, 1, 1] = True
+        app[0, 0, 0] = True
+        metrics = compute_binary_case_metrics(pred, gt, sem, app)
+        for key in (
+            "dice",
+            "iou",
+            "precision",
+            "recall",
+            "fp_voxels",
+            "fn_voxels",
+            "pred_gt_volume_ratio",
+            "connected_components",
+            "oracle_union_dice",
+            "oracle_intersection_iou",
+        ):
+            self.assertIn(key, metrics)
+        self.assertEqual(metrics["fp_voxels"], 1)
+        self.assertEqual(metrics["fn_voxels"], 0)
 
     def test_synthetic_smoke(self):
         result = run_synthetic_smoke(DHGAConfig(), "cpu")

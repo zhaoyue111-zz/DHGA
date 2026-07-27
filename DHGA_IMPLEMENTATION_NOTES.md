@@ -19,16 +19,17 @@ The current DHGA code provides typed configuration, migrated VoxTell utility cod
 - `dhga/config.py`: validates all DHGA-prefixed method fields in one place.
 - `dhga/shared_voxtell.py`: defines `SharedVoxTellFeatures` and `SharedEncoderOnce`; experts consume explicit feature caches rather than hooks.
 - `dhga/experts/semantic_expert.py`: semantic expert wrapper for prompt-decoder-biased logits, intended to use cross-attention LoRA in `transformer_decoder.layers.*.multihead_attn`.
-- `dhga/experts/appearance_expert.py`: residual 3D feature adapters on selected shared skip features. Each adapter is channel bottleneck plus depthwise 3D convolution and is zero-initialized at the residual output.
+- `dhga/experts/appearance_expert.py`: residual 3D feature adapters on selected shared skip features. Each adapter uses GroupNorm, channel bottleneck plus depthwise 3D convolution, and a zero-initialized residual output. Feature dropout is applied once in `adapt_features()` and selected feature replacement uses explicit `selected_feature_idx` metadata.
 - `dhga/routing/disagreement_router.py`: lightweight spatial router from semantic probability, appearance probability, low-dimensional visual context, stable foreground/background, and disagreement to per-voxel `w_sem(x)`, `w_app(x)`, `w_geo(x)`, consensus supervision weight, geometry disagreement weight, and initial fusion probability.
 - `dhga/geometry/sdf.py`: SDF uses one global convention: inside is negative, outside is positive.
 - `dhga/geometry/ray_sampler.py`: 3D ray sampling converts z,y,x voxel points to x,y,z `grid_sample` coordinates with `align_corners=True`; offsets are in millimeters and divided by per-axis spacing.
 - `dhga/geometry/boundary_corruption.py`: creates inward and outward SDF perturbations with recovery targets derived by sign convention.
 - `dhga/geometry/transport_head.py`: lightweight ray-token head with an explicit zero-displacement center bias and fallback for fully invalid rays.
-- `dhga/geometry/boundary_points.py`: extracts zero-level-set surface points using `dhga_surface_tolerance_mm`; empty and full masks produce no valid surface. Sparse displacements are diffused back with a physical millimeter Gaussian kernel.
+- `dhga/geometry/boundary_points.py`: extracts zero-level-set surface points using `dhga_surface_tolerance_mm`; empty and full masks produce no valid surface. Sparse displacements are diffused back with a physical millimeter Gaussian kernel using `scatter_add_` accumulation, and can return dense valid weights for final gating.
 - `dhga/voxtell_model.py`: real VoxTell-backed DHGA model. One encoder pass builds a shared feature cache; semantic output enables prompt-decoder LoRA, appearance output disables semantic LoRA and uses residual skip adapters, and anchor/baseline output disables both LoRA and appearance adapters. Geometry receives image/probability/SDF/ray offset evidence, prompt embeddings, and explicitly passed projected VoxTell intermediate visual features.
-- `dhga/trainer.py`: implements real Stage A/B/C/D training loops over unlabeled NIfTI volumes. Labels are not loaded by the trainer. Stage C/D patch ordering is guided by EMA/student pseudo-boundary scores rather than GT. `--init_checkpoint` transfers Stage B to C and Stage C to D; `--resume_checkpoint` restores model, optimizer, lightweight EMA, AMP scaler, epoch, global step, and RNG, and same-stage resume is enforced.
-- `dhga/evaluation.py`: evaluation-only sliding prediction. It aggregates semantic/app probabilities and VoxTell visual features in crop space, applies one SDF geometry correction, restores original space, saves NIfTI, and reads GT only for optional metrics including Dice, IoU, precision, recall, FP/FN voxels, volume ratio, and connected components.
+- `dhga/trainer.py`: implements real Stage A/B/C/D training loops over unlabeled NIfTI volumes. Labels are not loaded by the trainer. Stage A calls the model baseline path directly. Stage C returns raw boundary-recovery and minimal-transport losses and combines them exactly once in the training step. Stage D separately combines its router-target loss, Stage C auxiliary recovery, equivariance, prompt ranking if enabled, and weak natural minimal transport. Stage D reuses the same-patch teacher output, student output, and teacher SDF for its Stage C auxiliary path to avoid redundant encoder and SDF work. Stage C/D patch ordering is guided by EMA/student pseudo-boundary scores rather than GT. `--init_checkpoint` transfers Stage B to C and Stage C to D; after init loading the EMA teacher is hard-synchronized to the loaded model. `--resume_checkpoint` restores model, optimizer, lightweight EMA, AMP scaler, epoch, global step, and RNG, and same-stage resume is enforced.
+- `dhga/evaluation.py`: evaluation-only sliding prediction. It aggregates semantic/app probabilities and low-dimensional projected VoxTell visual features in crop space, applies one SDF geometry correction, restores original space, saves NIfTI, and reads GT only for optional metrics including Dice, IoU, precision, recall, FP/FN voxels, volume ratio, connected components, oracle union/intersection, expert complementarity, and disagreement statistics.
+- `dhga/inference.py`: owns the unified final geometry fusion function used by model forward, complete-volume evaluation, and mask finalization wrappers.
 - `dhga/losses.py`: cross-supervision is weighted by stable consensus and downweighted by disagreement, so high-disagreement voxels are not forced into agreement.
 - `dhga/checkpoint.py`: DHGA checkpoint payloads are versioned and loaded strictly; non-DHGA checkpoints are refused.
 
@@ -68,10 +69,10 @@ Frozen VoxTell encoder, text encoder, original prompt decoder base weights, and 
 
 ## Training Stages
 
-- Stage A: DHGA disabled or geometry disabled baseline checks. The expected behavior is identity relative to frozen VoxTell output when all DHGA adapters are zero/disabled.
+- Stage A: forced VoxTell baseline checks through `baseline_forward()`, independent of the `dhga_enabled` CLI default.
 - Stage B: semantic and appearance expert warm-up with frozen VoxTell anchor preservation, weak/strong intensity consistency, and stable-consensus cross supervision.
 - Stage C: self-supervised geometry pretraining from bidirectional SDF perturbation recovery. The target recovery displacement is derived from the known SDF perturbation sign.
-- Stage D: natural semantic-appearance disagreement routing plus one-step geometry decision, Stage C recovery retained, dense displacement equivariance on common valid support, and minimal transport as a weak regularizer. Prompt ranking is disabled by default (`dhga_prompt_ranking_weight=0`) until a real visual-text inside/outside ranking implementation is used.
+- Stage D: EMA-teacher-derived router target supervision plus one-step geometry decision, Stage C recovery retained with weights applied once, dense displacement equivariance on common valid support, and minimal transport as a weak regularizer. Prompt ranking is disabled by default (`dhga_prompt_ranking_weight=0`) until a real visual-text inside/outside ranking implementation is used.
 
 ## Spacing And Category Scope
 
@@ -80,6 +81,10 @@ Reader spacing is read from NIfTI properties and used as returned because the re
 ## Router And Geometry Gate
 
 The spatial router predicts `w_sem(x)`, `w_app(x)`, and `w_geo(x)`. Region probability is computed by renormalizing only `w_sem` and `w_app`, so `w_geo` cannot suppress foreground probability by stealing mass. The untrained router initializes near an even semantic/appearance blend with a small geometry gate. `w_geo` is used as geometry gate and contributes to boundary point sampling, displacement magnitude, and final narrow-band replacement.
+
+## Configuration Override Semantics
+
+When `--config_json` is used, only CLI options explicitly present in the command override the JSON values. This includes stage, data paths, checkpoints, epochs, AMP, losses, and DHGA module settings, so commands cannot silently run the stage stored in the JSON when the user passes a different `--dhga_stage`.
 
 ## External References
 

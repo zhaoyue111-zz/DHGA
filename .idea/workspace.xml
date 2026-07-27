@@ -1,0 +1,130 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="AutoImportSettings">
+    <option name="autoReloadType" value="ALL" />
+  </component>
+  <component name="ChangeListManager">
+    <list default="true" id="6fb578aa-0101-4d98-adb8-1c85a67dd3aa" name="Changes" comment="add voxtell_sfda module">
+      <change beforePath="$PROJECT_DIR$/DHGA_COMMANDS.md" beforeDir="false" afterPath="$PROJECT_DIR$/DHGA_COMMANDS.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/DHGA_IMPLEMENTATION_NOTES.md" beforeDir="false" afterPath="$PROJECT_DIR$/DHGA_IMPLEMENTATION_NOTES.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/dhga/checkpoint.py" beforeDir="false" afterPath="$PROJECT_DIR$/dhga/checkpoint.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/dhga/config.py" beforeDir="false" afterPath="$PROJECT_DIR$/dhga/config.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/dhga/evaluation.py" beforeDir="false" afterPath="$PROJECT_DIR$/dhga/evaluation.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/dhga/geometry/boundary_corruption.py" beforeDir="false" afterPath="$PROJECT_DIR$/dhga/geometry/boundary_corruption.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/dhga/geometry/transport_head.py" beforeDir="false" afterPath="$PROJECT_DIR$/dhga/geometry/transport_head.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/dhga/losses.py" beforeDir="false" afterPath="$PROJECT_DIR$/dhga/losses.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/dhga/routing/disagreement_router.py" beforeDir="false" afterPath="$PROJECT_DIR$/dhga/routing/disagreement_router.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/dhga/trainer.py" beforeDir="false" afterPath="$PROJECT_DIR$/dhga/trainer.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/dhga/voxtell_model.py" beforeDir="false" afterPath="$PROJECT_DIR$/dhga/voxtell_model.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/run_3d_dhga.py" beforeDir="false" afterPath="$PROJECT_DIR$/run_3d_dhga.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/test_dhga_static.py" beforeDir="false" afterPath="$PROJECT_DIR$/tests/test_dhga_static.py" afterDir="false" />
+    </list>
+    <option name="SHOW_DIALOG" value="false" />
+    <option name="HIGHLIGHT_CONFLICTS" value="true" />
+    <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
+    <option name="LAST_RESOLUTION" value="IGNORE" />
+  </component>
+  <component name="CopilotPersistence">
+    <persistenceIdMap>
+      <entry key="_/data/zy/DHGA" value="3H57nbHSOtqCD1Uok02xJlNK5qD" />
+    </persistenceIdMap>
+  </component>
+  <component name="EmbeddingIndexingInfo">
+    <option name="cachedIndexableFilesCount" value="27" />
+  </component>
+  <component name="Git.Settings">
+    <option name="RECENT_GIT_ROOT_PATH" value="$PROJECT_DIR$" />
+  </component>
+  <component name="GitHubPullRequestSearchHistory"><![CDATA[{
+  "lastFilter": {
+    "state": "OPEN",
+    "assignee": "zhaoyue111-zz"
+  }
+}]]></component>
+  <component name="GithubPullRequestsUISettings"><![CDATA[{
+  "selectedUrlAndAccountId": {
+    "url": "https://github.com/zhaoyue111-zz/DHGA.git",
+    "accountId": "4f094fe0-aa67-402d-a78e-7004a55271f5"
+  }
+}]]></component>
+  <component name="McpProjectServerCommands">
+    <commands />
+    <urls />
+  </component>
+  <component name="ProjectColorInfo"><![CDATA[{
+  "associatedIndex": 5,
+  "fromUser": false
+}]]></component>
+  <component name="ProjectId" id="3H57nbHSOtqCD1Uok02xJlNK5qD" />
+  <component name="ProjectViewState">
+    <option name="hideEmptyMiddlePackages" value="true" />
+    <option name="showLibraryContents" value="true" />
+  </component>
+  <component name="PropertiesComponent"><![CDATA[{
+  "keyToString": {
+    "ModuleVcsDetector.initialDetectionPerformed": "true",
+    "RunOnceActivity.MCP Project settings loaded": "true",
+    "RunOnceActivity.ShowReadmeOnStart": "true",
+    "RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252": "true",
+    "RunOnceActivity.git.unshallow": "true",
+    "RunOnceActivity.typescript.service.memoryLimit.init": "true",
+    "codeWithMe.voiceChat.enabledByDefault": "false",
+    "git-widget-placeholder": "main",
+    "last_opened_file_path": "/data/zy/DHGA",
+    "node.js.detected.package.eslint": "true",
+    "node.js.detected.package.tslint": "true",
+    "node.js.selected.package.eslint": "(autodetect)",
+    "node.js.selected.package.tslint": "(autodetect)",
+    "nodejs_package_manager_path": "npm",
+    "settings.editor.selected.configurable": "com.aito.ass.toolkit.settings.CodeAssistSettingsConfigurable",
+    "vue.rearranger.settings.migration": "true"
+  }
+}]]></component>
+  <component name="RecentsManager">
+    <key name="CopyFile.RECENT_KEYS">
+      <recent name="$PROJECT_DIR$" />
+    </key>
+  </component>
+  <component name="SharedIndexes">
+    <attachedChunks>
+      <set>
+        <option value="bundled-python-sdk-b63d5a1f7c97-b61e75351b1f-com.jetbrains.pycharm.pro.sharedIndexes.bundled-PY-261.22158.340" />
+      </set>
+    </attachedChunks>
+  </component>
+  <component name="TaskManager">
+    <task active="true" id="Default" summary="Default task">
+      <changelist id="6fb578aa-0101-4d98-adb8-1c85a67dd3aa" name="Changes" comment="" />
+      <created>1785146243950</created>
+      <option name="number" value="Default" />
+      <option name="presentableId" value="Default" />
+      <updated>1785146243950</updated>
+      <workItem from="1785146244991" duration="4290000" />
+    </task>
+    <task id="LOCAL-00001" summary="add voxtell_sfda module">
+      <option name="closed" value="true" />
+      <created>1785148654208</created>
+      <option name="number" value="00001" />
+      <option name="presentableId" value="LOCAL-00001" />
+      <option name="project" value="LOCAL" />
+      <updated>1785148654208</updated>
+    </task>
+    <option name="localTasksCounter" value="2" />
+    <servers />
+  </component>
+  <component name="TypeScriptGeneratedFilesManager">
+    <option name="version" value="3" />
+  </component>
+  <component name="VcsManagerConfiguration">
+    <MESSAGE value="add voxtell_sfda module" />
+    <option name="LAST_COMMIT_MESSAGE" value="add voxtell_sfda module" />
+  </component>
+  <component name="github-copilot-workspace">
+    <instructionFileLocations>
+      <option value=".github/instructions" />
+    </instructionFileLocations>
+    <promptFileLocations>
+      <option value=".github/prompts" />
+    </promptFileLocations>
+  </component>
+</project>

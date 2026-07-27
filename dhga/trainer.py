@@ -181,7 +181,7 @@ class DHGAStageTrainer:
                 load_training_state=False,
             )
             if self.teacher is not None:
-                self.teacher.update(self.model)
+                self.teacher.sync_from(self.model)
             self._set_stage_trainability()
             self.optimizer = None if self.config.dhga_stage == "A" else self._build_optimizer()
 
@@ -287,7 +287,10 @@ class DHGAStageTrainer:
         if stage == "B":
             return self._stage_b(patch, spacing)
         if stage == "C":
-            return self._stage_c(patch, spacing)
+            recovery, minimal, metrics = self._stage_c(patch, spacing)
+            loss = self._combine_stage_c_loss(recovery, minimal)
+            metrics["loss"] = float(loss.detach().cpu())
+            return loss, metrics
         if stage == "D":
             return self._stage_d(patch, spacing)
         raise ValueError(f"Unsupported stage {stage}")
@@ -325,10 +328,11 @@ class DHGAStageTrainer:
         return out
 
     def _stage_a(self, patch: Tensor, spacing: tuple[float, float, float]) -> tuple[Tensor, dict[str, float]]:
-        out = self.model(patch, spacing, run_geometry=False)
+        out = self.model.baseline_forward(patch, spacing) if hasattr(self.model, "baseline_forward") else self.model(patch, spacing, run_geometry=False)
         loss = (out.semantic_prob - out.anchor_prob.detach()).abs().mean() * 0.0
         metrics = diagnostics_from_probs(out.semantic_prob, out.appearance_prob, out.router)
         metrics["dhga_stage_a_anchor_delta"] = float((out.semantic_prob - out.anchor_prob).abs().mean().detach().cpu())
+        metrics["dhga_stage_a_forced_baseline"] = 1.0
         metrics["loss"] = float(loss.detach().cpu())
         return loss, metrics
 
@@ -360,10 +364,22 @@ class DHGAStageTrainer:
         })
         return loss, metrics
 
-    def _stage_c(self, patch: Tensor, spacing: tuple[float, float, float]) -> tuple[Tensor, dict[str, float]]:
-        teacher_out = self._teacher_forward(patch, spacing, run_geometry=False)
-        student_out = self.model(patch, spacing, run_geometry=False)
-        teacher_sdf = mask_to_sdf(teacher_out.router.fused_prob.detach() >= self.config.pred_threshold, spacing)
+    def _stage_c(
+        self,
+        patch: Tensor,
+        spacing: tuple[float, float, float],
+        teacher_out=None,
+        student_out=None,
+        teacher_sdf: Tensor | None = None,
+    ) -> tuple[Tensor, Tensor, dict[str, float]]:
+        reused_teacher = teacher_out is not None
+        reused_student = student_out is not None
+        if teacher_out is None:
+            teacher_out = self._teacher_forward(patch, spacing, run_geometry=False)
+        if student_out is None:
+            student_out = self.model(patch, spacing, run_geometry=False)
+        if teacher_sdf is None:
+            teacher_sdf = mask_to_sdf(teacher_out.router.fused_prob.detach() >= self.config.pred_threshold, spacing)
         stable_band = (teacher_sdf.abs() <= self.config.dhga_surface_tolerance_mm * 3.0) * (teacher_out.router.cross_supervision_weight.detach() > 0)
         corrupted_sdf, recovery_target, choices = make_local_boundary_corruption(
             teacher_sdf,
@@ -392,23 +408,35 @@ class DHGAStageTrainer:
         valid = valid_target[:, :, 0] & geometry["valid_boundary_points"]
         recovery = boundary_recovery_loss(geometry["sparse_displacement_mm"], target, valid.float())
         minimal = minimal_transport_loss(geometry["sparse_displacement_mm"], valid.float())
-        loss = self.config.dhga_boundary_recovery_weight * recovery + self.config.dhga_minimal_transport_weight * minimal
-        return loss, {
-            "loss": float(loss.detach().cpu()),
+        return recovery, minimal, {
             "dhga_boundary_recovery_loss": float(recovery.detach().cpu()),
             "dhga_minimal_transport_loss": float(minimal.detach().cpu()),
             "dhga_inward_corruptions": float(choices[..., 0].mean().detach().cpu()),
             "dhga_outward_corruptions": float(choices[..., 1].mean().detach().cpu()),
             "dhga_zero_corruptions": float(choices[..., 2].mean().detach().cpu()),
             "dhga_valid_boundary_points": float(valid.float().mean().detach().cpu()),
+            "dhga_reused_teacher_forward": float(reused_teacher),
+            "dhga_reused_student_forward": float(reused_student),
         }
 
+    def _combine_stage_c_loss(self, recovery: Tensor, minimal: Tensor) -> Tensor:
+        return self.config.dhga_boundary_recovery_weight * recovery + self.config.dhga_minimal_transport_weight * minimal
+
     def _stage_d(self, patch: Tensor, spacing: tuple[float, float, float]) -> tuple[Tensor, dict[str, float]]:
+        teacher_out = self._teacher_forward(patch, spacing, run_geometry=False)
         out = self.model(patch, spacing, run_geometry=True)
-        cross = router_fusion_loss(out.router, 0.5 * (out.semantic_prob + out.appearance_prob), out.router.cross_supervision_weight)
+        teacher_sdf = mask_to_sdf(teacher_out.router.fused_prob.detach() >= self.config.pred_threshold, spacing)
+        router_target = self._stage_d_router_target_loss(out, teacher_out)
         displacement = out.geometry.get("sparse_displacement_mm", patch.new_zeros(1))
         minimal = minimal_transport_loss(displacement)
-        recovery, recovery_metrics = self._stage_c(patch, spacing)
+        recovery, recovery_minimal, recovery_metrics = self._stage_c(
+            patch,
+            spacing,
+            teacher_out=teacher_out,
+            student_out=out,
+            teacher_sdf=teacher_sdf,
+        )
+        recovery_aux = self._combine_stage_c_loss(recovery, recovery_minimal)
         equiv = patch.new_zeros(())
         weak, strong, _ = weak_strong_intensity_views(patch)
         out_a = self.model(weak, spacing, run_geometry=True)
@@ -420,8 +448,8 @@ class DHGAStageTrainer:
             equiv = ((dense_b - dense_a).square() * common).sum() / common.sum().clamp_min(1.0)
         ranking = self._prompt_ranking_loss(out) if self.config.dhga_prompt_ranking_weight > 0 else patch.new_zeros(())
         loss = (
-            self.config.dhga_cross_supervision_weight * cross
-            + self.config.dhga_boundary_recovery_weight * recovery
+            self.config.dhga_cross_supervision_weight * router_target
+            + recovery_aux
             + self.config.dhga_transport_equivariance_weight * equiv
             + self.config.dhga_prompt_ranking_weight * ranking
             + self.config.dhga_minimal_transport_weight * minimal
@@ -429,14 +457,33 @@ class DHGAStageTrainer:
         metrics = diagnostics_from_probs(out.semantic_prob, out.appearance_prob, out.router)
         metrics.update({
             "loss": float(loss.detach().cpu()),
-            "dhga_cross_supervision_loss": float(cross.detach().cpu()),
+            "dhga_router_target_loss": float(router_target.detach().cpu()),
             "dhga_minimal_transport_loss": float(minimal.detach().cpu()),
             "dhga_boundary_recovery_loss": float(recovery.detach().cpu()),
+            "dhga_boundary_recovery_aux_loss": float(recovery_aux.detach().cpu()),
+            "dhga_recovery_minimal_loss": float(recovery_minimal.detach().cpu()),
+            "dhga_reused_teacher_forward": recovery_metrics.get("dhga_reused_teacher_forward", 0.0),
+            "dhga_reused_student_forward": recovery_metrics.get("dhga_reused_student_forward", 0.0),
             "dhga_transport_equivariance_loss": float(equiv.detach().cpu()),
             "dhga_prompt_ranking_loss": float(ranking.detach().cpu()),
+            "dhga_prompt_ranking_enabled": float(self.config.dhga_prompt_ranking_weight > 0),
             "dhga_abs_displacement_mm": float(displacement.detach().abs().mean().cpu()),
         })
         return loss, metrics
 
     def _prompt_ranking_loss(self, out) -> Tensor:
         return out.semantic_prob.new_zeros(())
+
+    def _stage_d_router_target_loss(self, student_out, teacher_out) -> Tensor:
+        with torch.no_grad():
+            teacher_disagreement = (teacher_out.semantic_prob - teacher_out.appearance_prob).abs()
+            sem_reliability = 1.0 - (teacher_out.semantic_prob - teacher_out.anchor_prob).abs()
+            app_reliability = 1.0 - (teacher_out.appearance_prob - teacher_out.anchor_prob).abs()
+            geo_reliability = teacher_disagreement
+            target = torch.cat([sem_reliability, app_reliability, geo_reliability], dim=1).clamp_min(0.0)
+            target = target / target.sum(dim=1, keepdim=True).clamp_min(1e-6)
+            weight = teacher_out.router.stable_foreground + teacher_out.router.stable_background + teacher_out.router.disagreement
+            weight = weight.detach().clamp(0, 1)
+        pred = torch.cat([student_out.router.w_sem, student_out.router.w_app, student_out.router.w_geo], dim=1)
+        loss = (pred - target.detach()).square().sum(dim=1, keepdim=True)
+        return (loss * weight).sum() / weight.sum().clamp_min(1.0)

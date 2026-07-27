@@ -38,6 +38,15 @@ class EMATeacher:
                 self.shadow[name] = self.shadow[name].to(device=value.device, dtype=value.dtype)
                 self.shadow[name].mul_(self.decay).add_(value, alpha=1.0 - self.decay)
 
+    def sync_from(self, student: nn.Module) -> None:
+        """Hard-copy current student trainable parameters into the EMA shadow."""
+        params = dict(student.named_parameters())
+        self.shadow = {
+            name: params[name].detach().clone()
+            for name in self.names
+            if name in params
+        }
+
     @contextmanager
     def apply_to(self, student: nn.Module):
         params = dict(student.named_parameters())

@@ -62,7 +62,8 @@ def sparse_displacements_to_dense_narrowband(
     spatial_shape: tuple[int, int, int],
     spacing: tuple[float, float, float] = (1.0, 1.0, 1.0),
     diffusion_mm: float = 2.0,
-) -> Tensor:
+    return_weight: bool = False,
+) -> Tensor | tuple[Tensor, Tensor]:
     """Scatter sparse point displacements into a dense narrow-band volume with a physical Gaussian kernel."""
     bsz, _, _ = points_zyx.shape
     dense = torch.zeros((bsz, 1, *spatial_shape), device=points_zyx.device, dtype=displacements_mm.dtype)
@@ -94,6 +95,12 @@ def sparse_displacements_to_dense_narrowband(
                     if c.numel() == 0:
                         continue
                     values = displacements_mm[batch_idx, in_bounds[batch_idx]]
-                    dense[batch_idx, 0, c[:, 0], c[:, 1], c[:, 2]] += values * kernel_weight
-                    counts[batch_idx, 0, c[:, 0], c[:, 1], c[:, 2]] += kernel_weight
-    return dense / counts.clamp_min(1.0)
+                    linear = c[:, 0] * (spatial_shape[1] * spatial_shape[2]) + c[:, 1] * spatial_shape[2] + c[:, 2]
+                    flat_dense = dense[batch_idx, 0].flatten()
+                    flat_counts = counts[batch_idx, 0].flatten()
+                    flat_dense.scatter_add_(0, linear, values * kernel_weight)
+                    flat_counts.scatter_add_(0, linear, values.new_full(values.shape, 1.0) * kernel_weight)
+    averaged = dense / counts.clamp_min(1.0)
+    if return_weight:
+        return averaged, counts
+    return averaged

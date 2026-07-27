@@ -9,6 +9,8 @@ import torch.nn.functional as F
 from tqdm import tqdm
 
 from dhga.config import DHGAConfig
+from dhga.geometry import mask_to_sdf
+from dhga.inference import finalize_probability
 from dhga.voxtell_model import build_dhga_voxtell_model
 from voxtell_sfda.adapter import foreground_dice_iou, load_split_manifest, match_label_path
 
@@ -56,35 +58,9 @@ class DHGAEvaluator:
                 label, _ = self.reader.read_seg(str(label_path))
                 label = np.asarray(label[0] if label.ndim == 4 else label)
                 gt = label == int(self.label_values[0])
-                dice, iou = foreground_dice_iou(pred, gt)
                 sem_pred = getattr(self, "last_semantic_pred", pred)
                 app_pred = getattr(self, "last_appearance_pred", pred)
-                oracle_union = np.logical_or(sem_pred, app_pred)
-                oracle_intersection = np.logical_and(sem_pred, app_pred)
-                oracle_union_dice, oracle_union_iou = foreground_dice_iou(oracle_union, gt)
-                oracle_intersection_dice, oracle_intersection_iou = foreground_dice_iou(oracle_intersection, gt)
-                tp = int(np.logical_and(pred, gt).sum())
-                fp = int(np.logical_and(pred, ~gt).sum())
-                fn = int(np.logical_and(~pred, gt).sum())
-                precision = tp / max(tp + fp, 1)
-                recall = tp / max(tp + fn, 1)
-                gt_voxels = int(gt.sum())
-                pred_voxels = int(pred.sum())
-                row.update({
-                    "dice": dice,
-                    "iou": iou,
-                    "precision": float(precision),
-                    "recall": float(recall),
-                    "fp_voxels": fp,
-                    "fn_voxels": fn,
-                    "gt_voxels": gt_voxels,
-                    "pred_gt_volume_ratio": float(pred_voxels / max(gt_voxels, 1)),
-                    "connected_components": connected_components_3d(pred),
-                    "oracle_union_dice": oracle_union_dice,
-                    "oracle_union_iou": oracle_union_iou,
-                    "oracle_intersection_dice": oracle_intersection_dice,
-                    "oracle_intersection_iou": oracle_intersection_iou,
-                })
+                row.update(compute_binary_case_metrics(pred, gt, sem_pred, app_pred))
             rows.append(row)
             out_name = path.name.replace(".nii.gz", "").replace(".nii", "") + "_dhga.nii.gz"
             self.reader.write_seg(pred.astype(np.uint8), str(self.save_dir / out_name), image_props)
@@ -117,7 +93,7 @@ class DHGAEvaluator:
                 sem_sum[(slice(None), slice(None), *slicer[1:])] += sem
                 app_sum[(slice(None), slice(None), *slicer[1:])] += app
                 count[(slice(None), slice(None), *slicer[1:])] += 1
-                visual = out.features.encoder_stages[self.model.geometry_feature_idx]
+                visual = self.model.geometry_visual_proj(out.features.encoder_stages[self.model.geometry_feature_idx])
                 visual = F.interpolate(visual, size=target_shape, mode="trilinear", align_corners=False)
                 if visual_sum is None:
                     visual_sum = torch.zeros((1, visual.shape[1], *data.shape[1:]), device=self.device)
@@ -149,13 +125,17 @@ class DHGAEvaluator:
                 self.model.text_embeddings,
                 spacing,
                 visual_feature=visual_feature,
+                visual_feature_is_projected=True,
             )
-            from dhga.geometry import mask_to_sdf
-
             phi = mask_to_sdf(router.fused_prob >= self.config.pred_threshold, spacing)
-            geo_prob = ((phi - geometry["dense_displacement_mm"]) / max(self.config.dhga_ray_step_mm, 1e-6)).neg().sigmoid()
-            gate = ((phi.abs() <= self.config.dhga_search_radius_mm) * router.w_geo).clamp(0, 1)
-            final = router.fused_prob * (1.0 - gate) + geo_prob * gate
+            final = finalize_probability(
+                router.fused_prob,
+                phi,
+                geometry["dense_displacement_mm"],
+                router.w_geo,
+                self.config,
+                geometry.get("dense_valid_weight"),
+            )
         final = final[(slice(None), slice(None), *slicer_revert_padding[1:])].cpu().numpy()[0]
         reverted = np.zeros((final.shape[0], *orig_shape), dtype=np.float32)
         reverted = self.insert_crop_into_image(reverted, final, bbox)
@@ -187,3 +167,44 @@ def connected_components_3d(mask: np.ndarray) -> int:
                         visited[nz, ny, nx] = True
                         stack.append((nz, ny, nx))
         return count
+
+
+def compute_binary_case_metrics(
+    pred: np.ndarray,
+    gt: np.ndarray,
+    semantic_pred: np.ndarray | None = None,
+    appearance_pred: np.ndarray | None = None,
+) -> dict[str, float | int]:
+    pred = pred.astype(bool)
+    gt = gt.astype(bool)
+    dice, iou = foreground_dice_iou(pred, gt)
+    tp = int(np.logical_and(pred, gt).sum())
+    fp = int(np.logical_and(pred, ~gt).sum())
+    fn = int(np.logical_and(~pred, gt).sum())
+    pred_voxels = int(pred.sum())
+    gt_voxels = int(gt.sum())
+    metrics: dict[str, float | int] = {
+        "dice": dice,
+        "iou": iou,
+        "precision": float(tp / max(tp + fp, 1)),
+        "recall": float(tp / max(tp + fn, 1)),
+        "fp_voxels": fp,
+        "fn_voxels": fn,
+        "gt_voxels": gt_voxels,
+        "pred_gt_volume_ratio": float(pred_voxels / max(gt_voxels, 1)),
+        "connected_components": connected_components_3d(pred),
+    }
+    if semantic_pred is not None and appearance_pred is not None:
+        semantic_pred = semantic_pred.astype(bool)
+        appearance_pred = appearance_pred.astype(bool)
+        oracle_union = np.logical_or(semantic_pred, appearance_pred)
+        oracle_intersection = np.logical_and(semantic_pred, appearance_pred)
+        union_dice, union_iou = foreground_dice_iou(oracle_union, gt)
+        intersection_dice, intersection_iou = foreground_dice_iou(oracle_intersection, gt)
+        metrics.update({
+            "oracle_union_dice": union_dice,
+            "oracle_union_iou": union_iou,
+            "oracle_intersection_dice": intersection_dice,
+            "oracle_intersection_iou": intersection_iou,
+        })
+    return metrics

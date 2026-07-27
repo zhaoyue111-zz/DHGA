@@ -18,7 +18,6 @@ class AppearanceFeatureAdapter(nn.Module):
             nn.Conv3d(channels, hidden, kernel_size=1, bias=False),
             nn.GroupNorm(num_groups=groups, num_channels=hidden),
             nn.GELU(),
-            nn.Dropout3d(dropout),
             nn.Conv3d(hidden, hidden, kernel_size=3, padding=1, groups=hidden, bias=False),
             nn.GELU(),
             nn.Conv3d(hidden, channels, kernel_size=1, bias=False),
@@ -50,7 +49,7 @@ class AppearanceExpert(nn.Module):
             if idx < 0 or idx >= len(feature_channels):
                 raise ValueError(f"appearance feature layer {raw_idx} is outside {len(feature_channels)} stages")
             self.resolved_layer_indices.append(idx)
-            self.adapters[str(idx)] = AppearanceFeatureAdapter(feature_channels[idx], hidden_ratio, dropout)
+            self.adapters[str(idx)] = AppearanceFeatureAdapter(feature_channels[idx], hidden_ratio, 0.0)
 
     def adapt_features(self, features: SharedVoxTellFeatures, feature_dropout: float = 0.0) -> SharedVoxTellFeatures:
         adapted = list(features.encoder_stages)

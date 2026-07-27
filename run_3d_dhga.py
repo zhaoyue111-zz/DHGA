@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import sys
 import torch
 
 from dhga.config import DHGAConfig, parse_int_list
@@ -87,17 +88,37 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dhga_minimal_transport_weight", type=float, default=0.01)
     parser.add_argument("--dhga_transport_smoothness_weight", type=float, default=0.0)
     parser.add_argument("--dhga_debug_outputs", action="store_true")
-    return parser.parse_args()
+    args = parser.parse_args()
+    option_to_dest = {}
+    for action in parser._actions:
+        for option in action.option_strings:
+            option_to_dest[option] = action.dest
+    provided = set()
+    for raw in sys.argv[1:]:
+        token = raw.split("=", 1)[0]
+        if token in option_to_dest:
+            provided.add(option_to_dest[token])
+    args._provided_cli_dests = provided
+    return args
 
 
 def config_from_args(args: argparse.Namespace) -> DHGAConfig:
     if args.config_json:
         config = DHGAConfig.from_json(args.config_json)
         values = config.to_dict()
-        values["init_checkpoint"] = args.init_checkpoint or values.get("init_checkpoint", "")
-        values["resume_checkpoint"] = args.resume_checkpoint or values.get("resume_checkpoint", "")
-        if args.device:
-            values["device"] = args.device
+        provided = set(getattr(args, "_provided_cli_dests", set()))
+        known = set(DHGAConfig.__dataclass_fields__)
+        for key in sorted(provided & known):
+            value = getattr(args, key)
+            if key == "dhga_appearance_feature_layers":
+                value = parse_int_list(value, values.get(key, [-1, -2, -3]))
+            elif key == "dhga_corruption_modes":
+                value = list(value)
+            elif key == "prompt_templates":
+                value = list(value)
+            values[key] = value
+        if "no_amp" in provided:
+            values["amp"] = not args.no_amp
         return DHGAConfig.from_mapping(values)
     return DHGAConfig(
         voxtell_repo=args.voxtell_repo,
