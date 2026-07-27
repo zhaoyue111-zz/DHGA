@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 
 from dhga.config import DHGAConfig, parse_int_list
-from dhga.trainer import run_synthetic_smoke
+from dhga.trainer import DHGAStageTrainer, run_synthetic_smoke
 from voxtell_sfda.adapter import load_prompts
 
 
@@ -13,10 +13,26 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser("DHGA VoxTell SFDA")
     parser.add_argument("--config_json", default="")
     parser.add_argument("--smoke_test", action="store_true", help="Run synthetic random-tensor smoke test only")
+    parser.add_argument("--self_check", action="store_true", help="Run synthetic smoke test and config validation")
     parser.add_argument("--dry_run", action="store_true", help="Validate config and print planned modules without training")
+    parser.add_argument("--train", action="store_true", help="Launch the selected real DHGA stage trainer")
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--save_dir", default=".save/dhga")
     parser.add_argument("--prompts", nargs="*", default=["liver"])
+    parser.add_argument("--voxtell_repo", default="/data/zy/VoxTell_from_disk")
+    parser.add_argument("--model_dir", default="/data/zy/VoxTell_from_disk/model")
+    parser.add_argument("--data_dir", default="")
+    parser.add_argument("--split_manifest", default="")
+    parser.add_argument("--sequences", default="")
+    parser.add_argument("--prompt_templates", nargs="*", default=["{}"])
+    parser.add_argument("--text_encoding_model", default="Qwen/Qwen3-Embedding-4B")
+    parser.add_argument("--epochs", type=int, default=1)
+    parser.add_argument("--steps_per_volume", type=int, default=1)
+    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--weight_decay", type=float, default=0.0)
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--max_cases", type=int, default=0)
+    parser.add_argument("--no_amp", action="store_true")
     parser.add_argument("--dhga_stage", choices=("A", "B", "C", "D"), default="B")
     parser.add_argument("--dhga_freeze_voxtell", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--dhga_semantic_adapter_rank", type=int, default=4)
@@ -50,6 +66,21 @@ def config_from_args(args: argparse.Namespace) -> DHGAConfig:
     if args.config_json:
         return DHGAConfig.from_json(args.config_json)
     return DHGAConfig(
+        voxtell_repo=args.voxtell_repo,
+        model_dir=args.model_dir,
+        data_dir=args.data_dir,
+        split_manifest=args.split_manifest,
+        sequences=args.sequences,
+        prompt_templates=list(args.prompt_templates),
+        text_encoding_model=args.text_encoding_model,
+        device=args.device,
+        epochs=args.epochs,
+        steps_per_volume=args.steps_per_volume,
+        lr=args.lr,
+        weight_decay=args.weight_decay,
+        amp=not args.no_amp,
+        seed=args.seed,
+        max_cases=args.max_cases,
         dhga_stage=args.dhga_stage,
         dhga_freeze_voxtell=args.dhga_freeze_voxtell,
         dhga_semantic_adapter_rank=args.dhga_semantic_adapter_rank,
@@ -88,7 +119,7 @@ def main() -> None:
     save_dir.mkdir(parents=True, exist_ok=True)
     (save_dir / "dhga_config.json").write_text(json.dumps(config.to_dict(), indent=2))
 
-    if args.smoke_test:
+    if args.smoke_test or args.self_check:
         result = run_synthetic_smoke(config, args.device)
         print(json.dumps({
             "smoke_loss": result.loss,
@@ -97,16 +128,20 @@ def main() -> None:
             "diagnostics": result.diagnostics,
             "trainable_summary": result.trainable_summary,
         }, indent=2))
+        if args.self_check:
+            print("DHGA self-check passed")
         return
 
     if args.dry_run:
         print(json.dumps({"config": config.to_dict(), "prompts": prompts}, indent=2))
         return
 
-    raise SystemExit(
-        "Real DHGA experiments are intentionally not launched by Codex. "
-        "Use DHGA_COMMANDS.md after running --smoke_test and reviewing paths."
-    )
+    if args.train:
+        trainer = DHGAStageTrainer(config, prompts, save_dir)
+        trainer.fit()
+        return
+
+    raise SystemExit("No action selected. Use --self_check, --dry_run, or --train.")
 
 
 if __name__ == "__main__":

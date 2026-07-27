@@ -4,10 +4,11 @@
 
 This repository now contains an independent `dhga/` namespace and a new `run_3d_dhga.py` entrypoint. The implementation is intentionally separated from `scripts/voxtell_sfda.py`; the old MLMP local entropy, pseudo CLS entropy, multi-prompt entropy averaging, and foreground-prior losses remain available only through the legacy entrypoint and are not imported by DHGA.
 
-The current DHGA code provides the method infrastructure, typed configuration, random-tensor smoke path, static tests, checkpoint format, and manual command plan. It does not automatically start real training or full validation, following the implementation plan's execution boundary.
+The current DHGA code provides typed configuration, migrated VoxTell utility code, a real `DHGAVoxTellModel`, Stage A/B/C/D trainer paths, random-tensor smoke checks, static tests, strict checkpoint format, and a command plan matching the CLI. Real training is only launched when the user explicitly passes `--train`.
 
 ## Reused MLMP-VoxTell Components
 
+- `voxtell_sfda/`: migrated into this repository so DHGA can import prompt parsing, NIfTI discovery/loading helpers, VoxTell import preparation, LoRA wrappers, and split manifest utilities without importing MLMP.
 - `voxtell_sfda.adapter.load_prompts`: reused for prompt text or prompt-file parsing in the new DHGA entrypoint.
 - Existing VoxTell integration locations identified: `VoxTellSFDAAdapter.__init__` initializes `VoxTellPredictor`, embeds text prompts, loads NIfTI IO, and selects device.
 - Existing shared forward locations identified: `_encoder_selected_skips`, `_forward_outputs_and_features`, `_decoder_selected_outputs`, and `_predict_volume_probabilities` contain encoder reuse, prompt decoder memory construction, decoder projection, and sliding-window aggregation logic.
@@ -24,6 +25,9 @@ The current DHGA code provides the method infrastructure, typed configuration, r
 - `dhga/geometry/ray_sampler.py`: 3D ray sampling converts z,y,x voxel points to x,y,z `grid_sample` coordinates with `align_corners=True`; offsets are in millimeters and divided by per-axis spacing.
 - `dhga/geometry/boundary_corruption.py`: creates inward and outward SDF perturbations with recovery targets derived by sign convention.
 - `dhga/geometry/transport_head.py`: lightweight ray-token head initialized to a uniform offset distribution, making zero expected displacement when offsets are symmetric.
+- `dhga/geometry/boundary_points.py`: extracts physical narrow-band boundary points and scatters sparse predicted displacements back to a dense narrow-band displacement field.
+- `dhga/voxtell_model.py`: real VoxTell-backed DHGA model. One encoder pass builds a shared feature cache; semantic output uses prompt-decoder LoRA, appearance output uses residual skip adapters and the frozen decoder path; geometry receives image/probability/SDF/ray offset evidence plus prompt embeddings.
+- `dhga/trainer.py`: implements real Stage A/B/C/D training loops over unlabeled NIfTI volumes. Labels are not loaded by the trainer.
 - `dhga/losses.py`: cross-supervision is weighted by stable consensus and downweighted by disagreement, so high-disagreement voxels are not forced into agreement.
 - `dhga/checkpoint.py`: DHGA checkpoint payloads are versioned and loaded strictly; non-DHGA checkpoints are refused.
 
@@ -35,6 +39,8 @@ The current DHGA code provides the method infrastructure, typed configuration, r
 - Normals: `[B, 1, D, H, W, 3]` in z,y,x axis order.
 - Ray points: `[B, N, 3]` in z,y,x voxel indices.
 - Ray samples: `[B, N, K, C]`, where `K = 2 * radius / step + 1`.
+- Ray tokens: `[B, N, K, 23]` by default: image intensity, semantic probability, appearance probability, disagreement, fused probability, SDF value, ray offset, and a 16-D projected prompt embedding.
+- Sparse displacement: `[B, N]` in millimeters, scattered to dense `[B, 1, D, H, W]` in the narrow band.
 
 ## Gradient Flow And Freezing
 
@@ -45,6 +51,7 @@ Default DHGA configuration sets `dhga_freeze_voxtell=True`. Trainable parameters
 - the continuous disagreement router;
 - the geometry transport head;
 - optional EMA teacher copies are updated without gradient.
+- prompt-conditioned ray token projection in the geometry path.
 
 Frozen VoxTell encoder, text encoder, original prompt decoder base weights, and original segmentation decoder weights should not receive gradients. `trainable_parameter_summary` prints module-level trainable parameter names and counts for smoke/dry-run checks.
 
@@ -62,9 +69,9 @@ Frozen VoxTell encoder, text encoder, original prompt decoder base weights, and 
 ## Training Stages
 
 - Stage A: DHGA disabled or geometry disabled baseline checks. The expected behavior is identity relative to frozen VoxTell output when all DHGA adapters are zero/disabled.
-- Stage B: semantic and appearance expert warm-up with frozen VoxTell and stable-consensus cross supervision.
-- Stage C: self-supervised geometry pretraining from bidirectional SDF perturbation recovery.
-- Stage D: natural semantic-appearance disagreement routing plus one-step geometry decision.
+- Stage B: semantic and appearance expert warm-up with frozen VoxTell anchor preservation, weak/strong intensity consistency, and stable-consensus cross supervision.
+- Stage C: self-supervised geometry pretraining from bidirectional SDF perturbation recovery. The target recovery displacement is derived from the known SDF perturbation sign.
+- Stage D: natural semantic-appearance disagreement routing plus one-step geometry decision with minimal transport regularization.
 
 ## External References
 
@@ -81,7 +88,7 @@ Frozen VoxTell encoder, text encoder, original prompt decoder base weights, and 
 
 ## Known Risks Before Real Data
 
-- The real VoxTell integration path still needs a full GPU data smoke run with actual checkpoint/model paths.
+- The real VoxTell integration path compiles and is importable, but still needs a user-run GPU data smoke run with actual checkpoint/model paths.
 - Sliding-window feature aggregation for geometry can be memory-heavy if high-resolution features are retained.
 - Semantic and appearance experts can collapse if stable consensus masks are too broad; diagnostics record expert correlation and disagreement ratio.
 - Geometry can collapse to zero displacement if minimal transport is overweighted; default minimal transport weight is intentionally small.

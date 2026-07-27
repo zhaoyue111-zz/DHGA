@@ -9,6 +9,7 @@ from dhga.config import DHGAConfig
 from dhga.experts import AppearanceExpert, SemanticExpert
 from dhga.geometry.boundary_corruption import make_bidirectional_corruption
 from dhga.geometry.ray_sampler import make_ray_offsets_mm, sample_along_normals
+from dhga.geometry.boundary_points import extract_boundary_points, sparse_displacements_to_dense_narrowband
 from dhga.geometry.sdf import mask_to_sdf, sdf_normals, update_sdf_with_displacement
 from dhga.inference import finalize_mask
 from dhga.losses import cross_supervision_loss
@@ -26,6 +27,23 @@ class DHGAStaticTests(unittest.TestCase):
         self.assertGreater(float(sdf[..., 0, 0, 0]), 0.0)
         outward = update_sdf_with_displacement(sdf, torch.ones_like(sdf))
         self.assertLess(float(outward[..., 2, 4, 4]), float(sdf[..., 2, 4, 4]))
+
+    def test_sdf_normals_point_outward(self):
+        z = torch.arange(7).view(1, 1, 7, 1, 1).float()
+        sdf = z - 3.0
+        sdf = sdf.expand(1, 1, 7, 5, 5).contiguous()
+        normals = sdf_normals(sdf)
+        self.assertGreater(float(normals[..., 3, 2, 2, 0]), 0.99)
+
+    def test_boundary_points_and_dense_displacement(self):
+        mask = torch.zeros(1, 1, 7, 7, 7, dtype=torch.bool)
+        mask[..., 2:5, 2:5, 2:5] = True
+        sdf = mask_to_sdf(mask)
+        points, normals, valid = extract_boundary_points(sdf, 1.5, 32)
+        self.assertEqual(points.shape, (1, 32, 3))
+        self.assertEqual(normals.shape, (1, 32, 3))
+        dense = sparse_displacements_to_dense_narrowband(points, torch.ones(1, 32), valid, (7, 7, 7))
+        self.assertGreater(float(dense.abs().sum()), 0.0)
 
     def test_ray_sampler_coordinate_order_and_spacing(self):
         volume = torch.zeros(1, 1, 5, 6, 7)

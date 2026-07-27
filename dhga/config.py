@@ -7,6 +7,21 @@ from typing import Iterable
 
 @dataclass
 class DHGAConfig:
+    voxtell_repo: str = "/data/zy/VoxTell_from_disk"
+    model_dir: str = "/data/zy/VoxTell_from_disk/model"
+    data_dir: str = ""
+    split_manifest: str = ""
+    sequences: str = ""
+    prompt_templates: list[str] = field(default_factory=lambda: ["{}"])
+    text_encoding_model: str = "Qwen/Qwen3-Embedding-4B"
+    device: str = "cuda"
+    epochs: int = 1
+    steps_per_volume: int = 1
+    lr: float = 1e-4
+    weight_decay: float = 0.0
+    amp: bool = True
+    seed: int = 0
+    max_cases: int = 0
     dhga_enabled: bool = True
     dhga_stage: str = "B"
     dhga_freeze_voxtell: bool = True
@@ -39,6 +54,10 @@ class DHGAConfig:
     def validate(self) -> None:
         if self.dhga_stage not in {"A", "B", "C", "D"}:
             raise ValueError("dhga_stage must be one of A, B, C, D")
+        if self.epochs < 0 or self.steps_per_volume < 0:
+            raise ValueError("epochs and steps_per_volume must be non-negative")
+        if self.lr <= 0:
+            raise ValueError("lr must be positive")
         if self.dhga_semantic_adapter_rank <= 0:
             raise ValueError("dhga_semantic_adapter_rank must be positive")
         if self.dhga_semantic_adapter_target not in {"cross", "self", "both"}:
