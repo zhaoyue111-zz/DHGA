@@ -54,6 +54,7 @@ class PromptConditionedRayTokens(nn.Module):
         sampled_app: Tensor,
         sampled_disagreement: Tensor,
         sampled_fused: Tensor,
+        sampled_geo_gate: Tensor,
         sampled_sdf: Tensor,
         sampled_visual: Tensor,
         offsets_mm: Tensor,
@@ -77,6 +78,7 @@ class PromptConditionedRayTokens(nn.Module):
                 sampled_app.float(),
                 sampled_disagreement.float(),
                 sampled_fused.float(),
+                sampled_geo_gate.float(),
                 sampled_sdf.float(),
                 sampled_visual.float(),
                 offsets.float(),
@@ -122,7 +124,7 @@ class DHGAVoxTellModel(nn.Module):
         self.ray_tokens = PromptConditionedRayTokens(text_embeddings.shape[-1])
         visual_channels = self._feature_channels_for_layer(channels, config.dhga_geometry_feature_layer)
         self.geometry_visual_proj = nn.Conv3d(visual_channels, config.dhga_geometry_feature_channels, kernel_size=1)
-        token_dim = 1 + 1 + 1 + 1 + 1 + 1 + config.dhga_geometry_feature_channels + 1 + 16
+        token_dim = 1 + 1 + 1 + 1 + 1 + 1 + 1 + config.dhga_geometry_feature_channels + 1 + 16
         self.geometry_head = GeometryTransportHead(token_dim, self.ray_offsets_mm)
 
     @classmethod
@@ -333,19 +335,21 @@ class DHGAVoxTellModel(nn.Module):
         sampled_app, valid_app = sample_along_normals(app_prob, points, normals, offsets, spacing)
         sampled_dis, valid_dis = sample_along_normals(router.disagreement, points, normals, offsets, spacing)
         sampled_fused, valid_fused = sample_along_normals(router.fused_prob, points, normals, offsets, spacing)
+        sampled_geo_gate, valid_geo_gate = sample_along_normals(router.w_geo, points, normals, offsets, spacing)
         sampled_sdf, valid_sdf = sample_along_normals(sdf, points, normals, offsets, spacing)
         if visual_feature is None:
             raise RuntimeError("run_geometry requires explicit visual_feature from the shared encoder")
         if not visual_feature_is_projected:
             visual_feature = self.geometry_visual_proj(visual_feature)
         sampled_visual, valid_visual = self._sample_visual_feature(visual_feature, points, normals, offsets, spacing, tuple(image.shape[-3:]))
-        valid = valid_ray & valid_sem & valid_app & valid_dis & valid_fused & valid_sdf & valid_visual & valid_points.unsqueeze(-1)
+        valid = valid_ray & valid_sem & valid_app & valid_dis & valid_fused & valid_geo_gate & valid_sdf & valid_visual & valid_points.unsqueeze(-1)
         tokens = self.ray_tokens(
             sampled_image,
             sampled_sem,
             sampled_app,
             sampled_dis,
             sampled_fused,
+            sampled_geo_gate,
             sampled_sdf,
             sampled_visual,
             offsets,

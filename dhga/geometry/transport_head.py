@@ -22,13 +22,18 @@ class GeometryTransportHead(nn.Module):
         nn.init.zeros_(self.net[-1].bias)
         center = int(torch.argmin(self.offsets_mm.abs()).item())
         self.center_index = center
-        self.center_bias = nn.Parameter(torch.tensor(4.0))
+        self.center_bias = nn.Parameter(torch.tensor(12.0))
+        step = torch.diff(self.offsets_mm).abs().min().clamp_min(1e-6) if self.offsets_mm.numel() > 1 else torch.tensor(1.0)
+        prior = -8.0 * self.offsets_mm.abs() / step
+        prior[center] = 0.0
+        self.register_buffer("zero_displacement_prior", prior.float())
 
     def forward(self, ray_tokens: Tensor, valid_mask: Tensor | None = None) -> dict[str, Tensor]:
         if ray_tokens.ndim != 4:
             raise ValueError("ray_tokens must have shape [B, N, K, C]")
         bsz, n_points, n_offsets, channels = ray_tokens.shape
         logits = self.net(ray_tokens.view(bsz * n_points, n_offsets, channels).permute(0, 2, 1)).squeeze(1)
+        logits = logits + self.zero_displacement_prior.to(device=logits.device, dtype=logits.dtype).view(1, -1)
         logits[:, self.center_index] = logits[:, self.center_index] + self.center_bias.to(logits.dtype)
         if valid_mask is not None:
             flat_valid = valid_mask.view(bsz * n_points, n_offsets)
@@ -42,4 +47,5 @@ class GeometryTransportHead(nn.Module):
         expected = (probs * offsets.view(1, 1, -1)).sum(dim=-1)
         expected = torch.where(any_valid.view(bsz, n_points), expected, torch.zeros_like(expected))
         entropy = -(probs * probs.clamp_min(1e-8).log()).sum(dim=-1)
+        entropy = torch.where(any_valid.view(bsz, n_points), entropy, torch.zeros_like(entropy))
         return {"logits": logits.view(bsz, n_points, n_offsets), "prob": probs, "expected_displacement_mm": expected, "entropy": entropy, "valid_points": any_valid.view(bsz, n_points)}

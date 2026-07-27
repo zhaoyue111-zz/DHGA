@@ -14,7 +14,7 @@ from .augment import weak_strong_intensity_views
 from .checkpoint import load_training_checkpoint, save_training_checkpoint
 from .config import DHGAConfig
 from .experts import AppearanceExpert, SemanticExpert
-from .geometry import GeometryTransportHead, make_ray_offsets_mm, mask_to_sdf
+from .geometry import GeometryTransportHead, extract_boundary_points, make_ray_offsets_mm, mask_to_sdf
 from .geometry.boundary_corruption import make_local_boundary_corruption
 from .geometry.ray_sampler import sample_along_normals
 from .losses import boundary_recovery_loss, cross_supervision_loss, diagnostics_from_probs, minimal_transport_loss, router_fusion_loss, weighted_bce_prob
@@ -439,11 +439,44 @@ class DHGAStageTrainer:
         recovery_aux = self._combine_stage_c_loss(recovery, recovery_minimal)
         equiv = patch.new_zeros(())
         weak, strong, _ = weak_strong_intensity_views(patch)
-        out_a = self.model(weak, spacing, run_geometry=True)
-        out_b = self.model(strong, spacing, run_geometry=True)
-        if out_a.geometry and out_b.geometry:
-            dense_a = out_a.geometry["dense_displacement_mm"].detach()
-            dense_b = out_b.geometry["dense_displacement_mm"]
+        boundary_points, boundary_normals, valid_boundary = extract_boundary_points(
+            teacher_sdf,
+            self.config.dhga_surface_tolerance_mm,
+            self.config.dhga_max_boundary_points,
+            spacing,
+            sampling_weight=teacher_out.router.geometry_disagreement_weight,
+        )
+        out_a = self.model(weak, spacing, run_geometry=False)
+        out_b = self.model(strong, spacing, run_geometry=False)
+        geometry_a = self.model.run_geometry(
+            weak,
+            out_a.semantic_prob,
+            out_a.appearance_prob,
+            out_a.router,
+            self.model.text_embeddings,
+            spacing,
+            initial_sdf=teacher_sdf,
+            visual_feature=out_a.features.encoder_stages[self.model.geometry_feature_idx],
+            boundary_points=boundary_points,
+            boundary_normals=boundary_normals,
+            valid_boundary_points=valid_boundary,
+        )
+        geometry_b = self.model.run_geometry(
+            strong,
+            out_b.semantic_prob,
+            out_b.appearance_prob,
+            out_b.router,
+            self.model.text_embeddings,
+            spacing,
+            initial_sdf=teacher_sdf,
+            visual_feature=out_b.features.encoder_stages[self.model.geometry_feature_idx],
+            boundary_points=boundary_points,
+            boundary_normals=boundary_normals,
+            valid_boundary_points=valid_boundary,
+        )
+        if geometry_a and geometry_b:
+            dense_a = geometry_a["dense_displacement_mm"].detach()
+            dense_b = geometry_b["dense_displacement_mm"]
             common = ((dense_a.abs() > 0) | (dense_b.abs() > 0)).float()
             equiv = ((dense_b - dense_a).square() * common).sum() / common.sum().clamp_min(1.0)
         ranking = self._prompt_ranking_loss(out) if self.config.dhga_prompt_ranking_weight > 0 else patch.new_zeros(())
@@ -464,6 +497,7 @@ class DHGAStageTrainer:
             "dhga_recovery_minimal_loss": float(recovery_minimal.detach().cpu()),
             "dhga_reused_teacher_forward": recovery_metrics.get("dhga_reused_teacher_forward", 0.0),
             "dhga_reused_student_forward": recovery_metrics.get("dhga_reused_student_forward", 0.0),
+            "dhga_shared_equivariance_boundary_points": float(valid_boundary.float().mean().detach().cpu()),
             "dhga_transport_equivariance_loss": float(equiv.detach().cpu()),
             "dhga_prompt_ranking_loss": float(ranking.detach().cpu()),
             "dhga_prompt_ranking_enabled": float(self.config.dhga_prompt_ranking_weight > 0),

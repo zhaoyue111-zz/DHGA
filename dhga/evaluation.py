@@ -101,7 +101,7 @@ class DHGAEvaluator:
             sem_prob = sem_sum / count.clamp_min(1)
             app_prob = app_sum / count.clamp_min(1)
             visual_feature = visual_sum / count.clamp_min(1)
-            router = self.model.router(sem_prob, app_prob)
+            router = self.model.router(sem_prob, app_prob, visual_context=visual_feature.mean(dim=1, keepdim=True))
             self.last_semantic_pred = (sem_prob >= self.config.pred_threshold).cpu().numpy()[0, 0]
             self.last_appearance_pred = (app_prob >= self.config.pred_threshold).cpu().numpy()[0, 0]
             sem_mask = sem_prob >= self.config.pred_threshold

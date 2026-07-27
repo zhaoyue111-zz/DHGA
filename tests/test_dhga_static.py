@@ -23,6 +23,7 @@ from dhga.trainer import DHGASmokeModel, run_synthetic_smoke
 from dhga.trainer import DHGAStageTrainer
 from dhga.teacher import EMATeacher
 from dhga.evaluation import compute_binary_case_metrics, connected_components_3d, spacing_from_reader_properties
+from dhga.voxtell_model import PromptConditionedRayTokens
 
 
 class DHGAStaticTests(unittest.TestCase):
@@ -369,6 +370,32 @@ class DHGAStaticTests(unittest.TestCase):
         self.assertEqual(float(out["expected_displacement_mm"].detach().abs().max()), 0.0)
         self.assertFalse(bool(out["valid_points"].any()))
         self.assertEqual(float(out["entropy"].detach().abs().max()), 0.0)
+
+    def test_truncated_ray_initialization_stays_near_zero(self):
+        offsets = make_ray_offsets_mm(6.0, 2.0)
+        head = GeometryTransportHead(3, offsets)
+        tokens = torch.randn(1, 1, offsets.numel(), 3)
+        valid = offsets.view(1, 1, -1) >= 0
+        out = head(tokens, valid)
+        self.assertLess(float(out["expected_displacement_mm"].detach().abs().max()), 1e-3)
+
+    def test_smoke_geometry_token_dim_includes_geo_gate(self):
+        maker = PromptConditionedRayTokens(prompt_dim=5, hidden_dim=16)
+        scalar = torch.zeros(1, 2, 3, 1)
+        visual = torch.zeros(1, 2, 3, 2)
+        tokens = maker(
+            scalar,
+            scalar,
+            scalar,
+            scalar,
+            scalar,
+            scalar,
+            scalar,
+            visual,
+            torch.tensor([-1.0, 0.0, 1.0]),
+            torch.zeros(1, 1, 5),
+        )
+        self.assertEqual(tokens.shape[-1], 1 + 1 + 1 + 1 + 1 + 1 + 1 + 2 + 1 + 16)
 
     def test_geometry_chunk_matches_full(self):
         offsets = make_ray_offsets_mm(2.0, 1.0)
