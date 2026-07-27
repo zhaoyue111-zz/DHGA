@@ -9,9 +9,9 @@ from typing import Iterable
 class DHGAConfig:
     voxtell_repo: str = "/data/zy/VoxTell_from_disk"
     model_dir: str = "/data/zy/VoxTell_from_disk/model"
-    data_dir: str = ""
-    split_manifest: str = ""
-    sequences: str = ""
+    data_dir: str = "/data/zy/CT_MRI_DATA_3D/images"
+    split_manifest: str = "/data/zy/DHGA/worst_zeroshot_split_p0/worst_zeroshot_split.json"
+    sequences: str = "P0"
     prompt_templates: list[str] = field(default_factory=lambda: ["{}"])
     text_encoding_model: str = "Qwen/Qwen3-Embedding-4B"
     device: str = "cuda"
@@ -52,7 +52,7 @@ class DHGAConfig:
     dhga_corruption_modes: list[str] = field(default_factory=lambda: ["inward", "outward"])
     dhga_boundary_recovery_weight: float = 1.0
     dhga_transport_equivariance_weight: float = 0.1
-    dhga_prompt_ranking_weight: float = 0.05
+    dhga_prompt_ranking_weight: float = 0.0
     dhga_minimal_transport_weight: float = 0.01
     dhga_transport_smoothness_weight: float = 0.0
     dhga_debug_outputs: bool = False

@@ -3,10 +3,26 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import torch
 
 from dhga.config import DHGAConfig, parse_int_list
 from dhga.trainer import DHGAStageTrainer, run_synthetic_smoke
+from dhga.evaluation import DHGAEvaluator
 from voxtell_sfda.adapter import load_prompts
+
+
+ARCHITECTURE_KEYS = {
+    "dhga_semantic_adapter_rank",
+    "dhga_semantic_adapter_target",
+    "dhga_appearance_feature_layers",
+    "dhga_appearance_hidden_ratio",
+    "dhga_geometry_feature_layer",
+    "dhga_geometry_feature_channels",
+    "dhga_search_radius_mm",
+    "dhga_ray_step_mm",
+    "dhga_max_boundary_points",
+    "dhga_boundary_chunk_size",
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -16,7 +32,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--self_check", action="store_true", help="Run synthetic smoke test and config validation")
     parser.add_argument("--dry_run", action="store_true", help="Validate config and print planned modules without training")
     parser.add_argument("--train", action="store_true", help="Launch the selected real DHGA stage trainer")
-    parser.add_argument("--device", default="cpu")
+    parser.add_argument("--evaluate_only", action="store_true", help="Run sliding-window DHGA prediction/evaluation without training")
+    parser.add_argument("--device", default=None)
     parser.add_argument("--save_dir", default=".save/dhga")
     parser.add_argument("--prompts", nargs="*", default=["liver"])
     parser.add_argument("--voxtell_repo", default="/data/zy/VoxTell_from_disk")
@@ -32,10 +49,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--weight_decay", type=float, default=0.0)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--max_cases", type=int, default=0)
+    parser.add_argument("--val_label_dir", default="")
+    parser.add_argument("--label_values", nargs="*", type=int, default=None)
     parser.add_argument("--init_checkpoint", default="")
     parser.add_argument("--resume_checkpoint", default="")
     parser.add_argument("--no_amp", action="store_true")
     parser.add_argument("--dhga_stage", choices=("A", "B", "C", "D"), default="B")
+    parser.add_argument("--dhga_enabled", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--dhga_freeze_voxtell", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--dhga_semantic_adapter_rank", type=int, default=4)
     parser.add_argument("--dhga_semantic_adapter_target", choices=("cross", "self", "both"), default="cross")
@@ -70,7 +90,13 @@ def parse_args() -> argparse.Namespace:
 
 def config_from_args(args: argparse.Namespace) -> DHGAConfig:
     if args.config_json:
-        return DHGAConfig.from_json(args.config_json)
+        config = DHGAConfig.from_json(args.config_json)
+        values = config.to_dict()
+        values["init_checkpoint"] = args.init_checkpoint or values.get("init_checkpoint", "")
+        values["resume_checkpoint"] = args.resume_checkpoint or values.get("resume_checkpoint", "")
+        if args.device:
+            values["device"] = args.device
+        return DHGAConfig.from_mapping(values)
     return DHGAConfig(
         voxtell_repo=args.voxtell_repo,
         model_dir=args.model_dir,
@@ -79,7 +105,7 @@ def config_from_args(args: argparse.Namespace) -> DHGAConfig:
         sequences=args.sequences,
         prompt_templates=list(args.prompt_templates),
         text_encoding_model=args.text_encoding_model,
-        device=args.device,
+        device=args.device or "cuda",
         epochs=args.epochs,
         steps_per_volume=args.steps_per_volume,
         lr=args.lr,
@@ -89,6 +115,7 @@ def config_from_args(args: argparse.Namespace) -> DHGAConfig:
         max_cases=args.max_cases,
         init_checkpoint=args.init_checkpoint,
         resume_checkpoint=args.resume_checkpoint,
+        dhga_enabled=args.dhga_enabled,
         dhga_stage=args.dhga_stage,
         dhga_freeze_voxtell=args.dhga_freeze_voxtell,
         dhga_semantic_adapter_rank=args.dhga_semantic_adapter_rank,
@@ -122,9 +149,30 @@ def config_from_args(args: argparse.Namespace) -> DHGAConfig:
     )
 
 
+def inherit_checkpoint_architecture(config: DHGAConfig) -> DHGAConfig:
+    checkpoint = config.resume_checkpoint or config.init_checkpoint
+    if not checkpoint:
+        return config
+    payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    ckpt_config = payload.get("config", {})
+    if not ckpt_config:
+        return config
+    values = config.to_dict()
+    for key in ARCHITECTURE_KEYS:
+        if key in ckpt_config:
+            values[key] = ckpt_config[key]
+    values["init_checkpoint"] = config.init_checkpoint
+    values["resume_checkpoint"] = config.resume_checkpoint
+    values["dhga_stage"] = config.dhga_stage
+    values["epochs"] = config.epochs
+    values["save_dir"] = values.get("save_dir", "")
+    return DHGAConfig.from_mapping(values)
+
+
 def main() -> None:
     args = parse_args()
     config = config_from_args(args)
+    config = inherit_checkpoint_architecture(config)
     config.validate()
     prompts = load_prompts(args.prompts) if args.prompts else []
     save_dir = Path(args.save_dir)
@@ -132,7 +180,7 @@ def main() -> None:
     (save_dir / "dhga_config.json").write_text(json.dumps(config.to_dict(), indent=2))
 
     if args.smoke_test or args.self_check:
-        result = run_synthetic_smoke(config, args.device)
+        result = run_synthetic_smoke(config, args.device or "cpu")
         print(json.dumps({
             "smoke_loss": result.loss,
             "shared_encoder_calls": result.shared_encoder_calls,
@@ -151,6 +199,11 @@ def main() -> None:
     if args.train:
         trainer = DHGAStageTrainer(config, prompts, save_dir)
         trainer.fit()
+        return
+
+    if args.evaluate_only:
+        evaluator = DHGAEvaluator(config, prompts, save_dir, args.val_label_dir, args.label_values)
+        print(json.dumps(evaluator.evaluate_split("test", args.max_cases), indent=2))
         return
 
     raise SystemExit("No action selected. Use --self_check, --dry_run, or --train.")

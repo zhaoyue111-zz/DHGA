@@ -147,6 +147,27 @@ CUDA_VISIBLE_DEVICES=0 conda run -n voxtell python run_3d_dhga.py \
   --steps_per_volume 2
 ```
 
+## Evaluation-Only Sliding Prediction
+
+This path reads GT only when `--val_label_dir` is supplied, and only for reporting metrics. It aggregates semantic/app probabilities and VoxTell visual features in crop space, applies one SDF geometry correction, restores original space, and saves NIfTI masks.
+
+```bash
+CUDA_VISIBLE_DEVICES=0 conda run -n voxtell python run_3d_dhga.py \
+  --evaluate_only \
+  --init_checkpoint .save/dhga/stage_d/checkpoint_final.pt \
+  --save_dir .save/dhga/eval_only \
+  --voxtell_repo /data/zy/VoxTell_from_disk \
+  --model_dir /data/zy/VoxTell_from_disk/model \
+  --data_dir /data/zy/CT_MRI_DATA_3D/images/P0 \
+  --split_manifest /data/zy/MLMP/worst_zeroshot_split_p0/worst_zeroshot_split.json \
+  --sequences P0 \
+  --prompts liver \
+  --val_label_dir /data/zy/CT_MRI_DATA_3D/labels/P0 \
+  --label_values 5 \
+  --device cuda \
+  --max_cases 1
+```
+
 ## Resume Interrupted Training
 
 Use `--resume_checkpoint` for the same stage. This restores model, optimizer, EMA, AMP scaler, epoch, global step, and RNG state.

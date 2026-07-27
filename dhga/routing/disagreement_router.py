@@ -78,7 +78,10 @@ class DisagreementRouter(nn.Module):
         w_sem = weights[:, 0:1]
         w_app = weights[:, 1:2]
         w_geo = weights[:, 2:3]
-        fused = w_sem * sem_prob + w_app * app_prob
+        region_denom = (w_sem + w_app).clamp_min(1e-6)
+        region_w_sem = w_sem / region_denom
+        region_w_app = w_app / region_denom
+        fused = region_w_sem * sem_prob + region_w_app * app_prob
         consensus_mask = (stable_foreground > stable_background) & (
             disagreement_weight < disagreement_weight.flatten(2).quantile(self.disagreement_quantile, dim=-1, keepdim=True).view(*disagreement_weight.shape[:2], 1, 1, 1)
         )

@@ -17,6 +17,9 @@ from dhga.losses import cross_supervision_loss
 from dhga.routing import DisagreementRouter
 from dhga.shared_voxtell import SharedEncoderOnce
 from dhga.trainer import DHGASmokeModel, run_synthetic_smoke
+from dhga.trainer import DHGAStageTrainer
+from dhga.teacher import EMATeacher
+from dhga.evaluation import spacing_from_reader_properties
 
 
 class DHGAStaticTests(unittest.TestCase):
@@ -109,6 +112,19 @@ class DHGAStaticTests(unittest.TestCase):
         loss = cross_supervision_loss(sem, app, router)
         self.assertLess(float(loss), 0.01)
 
+    def test_router_region_probability_renormalizes_without_geo_suppression(self):
+        sem = torch.ones(1, 1, 3, 3, 3) * 0.8
+        app = torch.ones_like(sem) * 0.2
+        router = DisagreementRouter("none")
+        with torch.no_grad():
+            router.spatial_head[-1].bias[:] = torch.tensor([0.0, 0.0, 5.0])
+        out = router(sem, app)
+        self.assertGreater(float(out.w_geo.detach().mean()), 0.9)
+        self.assertAlmostEqual(float(out.fused_prob.detach().mean()), 0.5, places=4)
+
+    def test_spacing_properties_are_not_reversed(self):
+        self.assertEqual(spacing_from_reader_properties({"spacing": (0.7, 0.8, 2.5)}), (0.7, 0.8, 2.5))
+
     def test_identity_geometry_keeps_mask(self):
         config = DHGAConfig(dhga_geometry_enabled=True)
         prob = torch.rand(1, 1, 5, 5, 5)
@@ -137,6 +153,17 @@ class DHGAStaticTests(unittest.TestCase):
             payload = load_training_checkpoint(path, model, optim, model, scaler)
         self.assertEqual(int(payload["epoch"]), 3)
         self.assertEqual(int(payload["global_step"]), 17)
+
+    def test_ema_teacher_tracks_only_trainable_parameters(self):
+        config = DHGAConfig()
+        model = DHGASmokeModel(config)
+        for param in model.parameters():
+            param.requires_grad_(False)
+        for param in model.router.parameters():
+            param.requires_grad_(True)
+        ema = EMATeacher(model)
+        self.assertTrue(ema.names)
+        self.assertTrue(all(name.startswith("router.") for name in ema.names))
 
     def test_invalid_ray_keeps_near_zero_displacement(self):
         offsets = make_ray_offsets_mm(2.0, 1.0)

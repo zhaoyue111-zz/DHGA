@@ -12,6 +12,7 @@ def extract_boundary_points(
     radius_mm: float,
     max_points: int,
     spacing: tuple[float, float, float] = (1.0, 1.0, 1.0),
+    sampling_weight: Tensor | None = None,
 ) -> tuple[Tensor, Tensor, Tensor]:
     """Return padded boundary point coordinates and normals in z,y,x order."""
     if sdf.ndim != 5 or sdf.shape[1] != 1:
@@ -32,7 +33,14 @@ def extract_boundary_points(
         if coords.numel() == 0:
             coords = torch.zeros((0, 3), device=sdf.device, dtype=torch.long)
         if coords.shape[0] > max_points:
-            order = torch.randperm(coords.shape[0], device=sdf.device)[:max_points]
+            if sampling_weight is not None:
+                weights = sampling_weight[batch_idx, 0, coords[:, 0], coords[:, 1], coords[:, 2]].float().clamp_min(0)
+                if float(weights.sum()) > 0:
+                    order = torch.multinomial(weights, max_points, replacement=False)
+                else:
+                    order = torch.randperm(coords.shape[0], device=sdf.device)[:max_points]
+            else:
+                order = torch.randperm(coords.shape[0], device=sdf.device)[:max_points]
             coords = coords[order]
         normals = normals_grid[batch_idx, coords[:, 0], coords[:, 1], coords[:, 2]] if coords.numel() else torch.zeros((0, 3), device=sdf.device)
         valid = torch.ones(coords.shape[0], device=sdf.device, dtype=torch.bool)

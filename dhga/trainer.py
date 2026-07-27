@@ -111,7 +111,7 @@ class DHGAStageTrainer:
         self.model, self.predictor, self.prompts = build_dhga_voxtell_model(config, prompts)
         self.device = next(self.model.parameters()).device
         self._set_stage_trainability()
-        self.optimizer = self._build_optimizer()
+        self.optimizer = None if config.dhga_stage == "A" else self._build_optimizer()
         self.scaler = torch.amp.GradScaler("cuda", enabled=config.amp and self.device.type == "cuda")
         self.teacher = EMATeacher(self.model, config.dhga_ema_decay) if config.dhga_use_ema_teacher else None
         self.start_epoch = 0
@@ -154,8 +154,7 @@ class DHGAStageTrainer:
             for param in self.model.geometry_visual_proj.parameters():
                 param.requires_grad_(True)
         elif stage == "A":
-            for param in self.model.router.parameters():
-                param.requires_grad_(True)
+            pass
         else:
             raise ValueError(f"Unsupported stage {stage}")
 
@@ -165,7 +164,7 @@ class DHGAStageTrainer:
                 self.config.resume_checkpoint,
                 self.model,
                 self.optimizer,
-                self.teacher.module if self.teacher is not None else None,
+                self.teacher if self.teacher is not None else None,
                 self.scaler,
                 load_training_state=True,
             )
@@ -179,9 +178,9 @@ class DHGAStageTrainer:
                 load_training_state=False,
             )
             if self.teacher is not None:
-                self.teacher.module.load_state_dict(self.model.state_dict(), strict=True)
+                self.teacher.update(self.model)
             self._set_stage_trainability()
-            self.optimizer = self._build_optimizer()
+            self.optimizer = None if self.config.dhga_stage == "A" else self._build_optimizer()
 
     def _init_io(self) -> None:
         from acvl_utils.cropping_and_padding.padding import pad_nd_image
@@ -217,7 +216,7 @@ class DHGAStageTrainer:
         values = tuple(float(v) for v in spacing)
         if len(values) != 3:
             return (1.0, 1.0, 1.0)
-        return (values[2], values[1], values[0])
+        return values
 
     def fit(self) -> None:
         (self.save_dir / "dhga_config.json").write_text(json.dumps(self.config.to_dict(), indent=2))
@@ -235,17 +234,21 @@ class DHGAStageTrainer:
                     slicers = slicers[: self.config.steps_per_volume]
                 for slicer in slicers:
                     patch = torch.clone(volume[slicer][None], memory_format=torch.contiguous_format).to(self.device)
-                    with torch.autocast(self.device.type, enabled=self.config.amp and self.device.type == "cuda"):
-                        loss, metrics = self.training_step(patch, spacing=spacing)
-                    self.optimizer.zero_grad(set_to_none=True)
-                    self.scaler.scale(loss).backward()
-                    self.scaler.unscale_(self.optimizer)
-                    torch.nn.utils.clip_grad_norm_([p for p in self.model.parameters() if p.requires_grad], 1.0)
-                    self.scaler.step(self.optimizer)
-                    self.scaler.update()
-                    self.global_step += 1
-                    if self.teacher is not None:
-                        self.teacher.update(self.model)
+                    if self.config.dhga_stage == "A":
+                        with torch.no_grad():
+                            loss, metrics = self.training_step(patch, spacing=spacing)
+                    else:
+                        with torch.autocast(self.device.type, enabled=self.config.amp and self.device.type == "cuda"):
+                            loss, metrics = self.training_step(patch, spacing=spacing)
+                        self.optimizer.zero_grad(set_to_none=True)
+                        self.scaler.scale(loss).backward()
+                        self.scaler.unscale_(self.optimizer)
+                        torch.nn.utils.clip_grad_norm_([p for p in self.model.parameters() if p.requires_grad], 1.0)
+                        self.scaler.step(self.optimizer)
+                        self.scaler.update()
+                        self.global_step += 1
+                        if self.teacher is not None:
+                            self.teacher.update(self.model)
                     record = {"epoch": epoch + 1, "case": str(path), **metrics}
                     history.append(record)
             save_training_checkpoint(
@@ -253,7 +256,7 @@ class DHGAStageTrainer:
                 self.model,
                 self.config,
                 optimizer=self.optimizer,
-                ema=self.teacher.module if self.teacher is not None else None,
+                ema=self.teacher if self.teacher is not None else None,
                 scaler=self.scaler,
                 epoch=epoch + 1,
                 global_step=self.global_step,
@@ -264,7 +267,7 @@ class DHGAStageTrainer:
             self.model,
             self.config,
             optimizer=self.optimizer,
-            ema=self.teacher.module if self.teacher is not None else None,
+            ema=self.teacher if self.teacher is not None else None,
             scaler=self.scaler,
             epoch=self.config.epochs,
             global_step=self.global_step,
@@ -285,11 +288,15 @@ class DHGAStageTrainer:
         raise ValueError(f"Unsupported stage {stage}")
 
     def _teacher_forward(self, patch: Tensor, spacing: tuple[float, float, float], run_geometry: bool = False):
-        module = self.teacher.module if self.teacher is not None and self.global_step >= self.config.dhga_ema_warmup_steps else self.model
+        module = self.model
         was_training = module.training
         module.eval()
         with torch.no_grad():
-            out = module(patch, spacing, run_geometry=run_geometry)
+            if self.teacher is not None and self.global_step >= self.config.dhga_ema_warmup_steps:
+                with self.teacher.apply_to(module):
+                    out = module(patch, spacing, run_geometry=run_geometry)
+            else:
+                out = module(patch, spacing, run_geometry=run_geometry)
         module.train(was_training)
         return out
 
@@ -308,7 +315,10 @@ class DHGAStageTrainer:
         stable_anchor = ((teacher_out.anchor_prob.detach() > 0.9) | (teacher_out.anchor_prob.detach() < 0.1)).float()
         anchor_loss = weighted_bce_prob(strong_out.semantic_prob, teacher_out.anchor_prob.detach(), stable_anchor)
         weak_strong = F.mse_loss(strong_out.semantic_prob, teacher_out.semantic_prob.detach()) + F.mse_loss(strong_out.appearance_prob, teacher_out.appearance_prob.detach())
-        cross = cross_supervision_loss(strong_out.semantic_prob, strong_out.appearance_prob, teacher_out.router)
+        weight = teacher_out.router.cross_supervision_weight.detach()
+        sem_from_teacher_app = weighted_bce_prob(strong_out.semantic_prob, teacher_out.appearance_prob.detach(), weight)
+        app_from_teacher_sem = weighted_bce_prob(strong_out.appearance_prob, teacher_out.semantic_prob.detach(), weight)
+        cross = 0.5 * (sem_from_teacher_app + app_from_teacher_sem)
         loss = (
             self.config.dhga_anchor_weight * anchor_loss
             + self.config.dhga_weak_strong_weight * weak_strong
@@ -342,6 +352,7 @@ class DHGAStageTrainer:
             self.model.text_embeddings,
             spacing,
             initial_sdf=corrupted_sdf,
+            visual_feature=student_out.features.encoder_stages[self.model.geometry_feature_idx],
         )
         sampled_target, valid_target = sample_along_normals(
             recovery_target,
@@ -376,8 +387,11 @@ class DHGAStageTrainer:
         out_a = self.model(weak, spacing, run_geometry=True)
         out_b = self.model(strong, spacing, run_geometry=True)
         if out_a.geometry and out_b.geometry:
-            equiv = F.mse_loss(out_b.geometry["sparse_displacement_mm"], out_a.geometry["sparse_displacement_mm"].detach())
-        ranking = self._prompt_ranking_loss(out)
+            dense_a = out_a.geometry["dense_displacement_mm"].detach()
+            dense_b = out_b.geometry["dense_displacement_mm"]
+            common = ((dense_a.abs() > 0) | (dense_b.abs() > 0)).float()
+            equiv = ((dense_b - dense_a).square() * common).sum() / common.sum().clamp_min(1.0)
+        ranking = self._prompt_ranking_loss(out) if self.config.dhga_prompt_ranking_weight > 0 else patch.new_zeros(())
         loss = (
             self.config.dhga_cross_supervision_weight * cross
             + self.config.dhga_boundary_recovery_weight * recovery
@@ -398,10 +412,4 @@ class DHGAStageTrainer:
         return loss, metrics
 
     def _prompt_ranking_loss(self, out) -> Tensor:
-        if not out.geometry:
-            return out.semantic_prob.new_zeros(())
-        # Proxy ranking: predicted outward corrections should align with higher inside semantic support.
-        displacement = out.geometry["sparse_displacement_mm"]
-        valid = out.geometry["valid_boundary_points"].float()
-        signed_support = displacement * valid
-        return F.relu(-signed_support).sum() / valid.sum().clamp_min(1.0)
+        return out.semantic_prob.new_zeros(())

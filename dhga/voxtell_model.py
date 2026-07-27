@@ -187,6 +187,22 @@ class DHGAVoxTellModel(nn.Module):
 
     def forward(self, image: Tensor, spacing: tuple[float, float, float] = (1.0, 1.0, 1.0), run_geometry: bool = True) -> DHGAForwardOutput:
         features = self.encode_once(image, spacing)
+        if not self.config.dhga_enabled:
+            with torch.no_grad(), self.lora_disabled(), self.appearance_disabled():
+                base_logits, _ = self.decode_from_features(features.encoder_stages, features.selected_feature)
+                base_prob = self._class_probs(base_logits)
+            router = self.router(base_prob, base_prob)
+            return DHGAForwardOutput(
+                semantic_logits=base_logits,
+                appearance_logits=base_logits,
+                semantic_prob=base_prob,
+                appearance_prob=base_prob,
+                anchor_prob=base_prob,
+                router=router,
+                geometry={},
+                final_prob=base_prob,
+                features=features,
+            )
         semantic_logits, projected_prompt = self.decode_from_features(features.encoder_stages, features.selected_feature)
         with self.lora_disabled():
             app_features = self.appearance_expert.adapt_features(features, self.config.dhga_appearance_feature_dropout)
@@ -198,11 +214,14 @@ class DHGAVoxTellModel(nn.Module):
             anchor_logits, _ = self.decode_from_features(features.encoder_stages, features.selected_feature)
             anchor_prob = self._class_probs(anchor_logits)
         router = self.router(sem_prob, app_prob)
-        geometry = self.run_geometry(image, sem_prob, app_prob, router, self.text_embeddings, spacing) if run_geometry and self.config.dhga_geometry_enabled else {}
+        visual_feature = features.encoder_stages[self.geometry_feature_idx]
+        geometry = self.run_geometry(image, sem_prob, app_prob, router, self.text_embeddings, spacing, visual_feature=visual_feature) if run_geometry and self.config.dhga_geometry_enabled else {}
         final_prob = router.fused_prob
         if "dense_displacement_mm" in geometry:
             sdf = mask_to_sdf(router.fused_prob >= self.config.pred_threshold, spacing)
-            final_prob = (sdf - geometry["dense_displacement_mm"]).neg().sigmoid()
+            geo_prob = ((sdf - geometry["dense_displacement_mm"]) / max(self.config.dhga_ray_step_mm, 1e-6)).neg().sigmoid()
+            narrow_gate = ((sdf.abs() <= self.config.dhga_search_radius_mm) * router.w_geo).clamp(0, 1)
+            final_prob = router.fused_prob * (1.0 - narrow_gate) + geo_prob * narrow_gate
         return DHGAForwardOutput(
             semantic_logits=semantic_logits,
             appearance_logits=appearance_logits,
@@ -277,14 +296,22 @@ class DHGAVoxTellModel(nn.Module):
         prompt_embedding: Tensor,
         spacing: tuple[float, float, float],
         initial_sdf: Tensor | None = None,
+        visual_feature: Tensor | None = None,
+        boundary_points: Tensor | None = None,
+        boundary_normals: Tensor | None = None,
+        valid_boundary_points: Tensor | None = None,
     ) -> dict[str, Tensor]:
         sdf = initial_sdf if initial_sdf is not None else mask_to_sdf(router.fused_prob >= self.config.pred_threshold, spacing)
-        points, normals, valid_points = extract_boundary_points(
-            sdf,
-            self.config.dhga_surface_tolerance_mm,
-            self.config.dhga_max_boundary_points,
-            spacing,
-        )
+        if boundary_points is None or boundary_normals is None or valid_boundary_points is None:
+            points, normals, valid_points = extract_boundary_points(
+                sdf,
+                self.config.dhga_surface_tolerance_mm,
+                self.config.dhga_max_boundary_points,
+                spacing,
+                sampling_weight=router.geometry_disagreement_weight,
+            )
+        else:
+            points, normals, valid_points = boundary_points, boundary_normals, valid_boundary_points
         offsets = self.ray_offsets_mm.to(image.device)
         sampled_image, valid_ray = sample_along_normals(image[:, :1], points, normals, offsets, spacing)
         sampled_sem, valid_sem = sample_along_normals(sem_prob, points, normals, offsets, spacing)
@@ -292,7 +319,9 @@ class DHGAVoxTellModel(nn.Module):
         sampled_dis, valid_dis = sample_along_normals(router.disagreement, points, normals, offsets, spacing)
         sampled_fused, valid_fused = sample_along_normals(router.fused_prob, points, normals, offsets, spacing)
         sampled_sdf, valid_sdf = sample_along_normals(sdf, points, normals, offsets, spacing)
-        visual_feature = self.geometry_visual_proj(self._last_geometry_feature)
+        if visual_feature is None:
+            raise RuntimeError("run_geometry requires explicit visual_feature from the shared encoder")
+        visual_feature = self.geometry_visual_proj(visual_feature)
         sampled_visual, valid_visual = self._sample_visual_feature(visual_feature, points, normals, offsets, spacing, tuple(image.shape[-3:]))
         valid = valid_ray & valid_sem & valid_app & valid_dis & valid_fused & valid_sdf & valid_visual & valid_points.unsqueeze(-1)
         tokens = self.ray_tokens(
@@ -309,7 +338,7 @@ class DHGAVoxTellModel(nn.Module):
         pred = self._geometry_forward_chunked(tokens, valid)
         dense = sparse_displacements_to_dense_narrowband(
             points,
-            pred["expected_displacement_mm"],
+            pred["expected_displacement_mm"] * self._sample_point_weight(router.geometry_disagreement_weight, points),
             valid_points,
             tuple(image.shape[-3:]),
             spacing=spacing,
@@ -326,6 +355,24 @@ class DHGAVoxTellModel(nn.Module):
             "dense_displacement_mm": dense,
             "displacement_entropy": pred["entropy"],
         }
+
+    def _sample_point_weight(self, weight_volume: Tensor, points: Tensor) -> Tensor:
+        rounded = points.round().long()
+        out = torch.zeros(points.shape[:2], device=points.device, dtype=weight_volume.dtype)
+        for batch_idx in range(points.shape[0]):
+            coords = rounded[batch_idx]
+            valid = (
+                (coords[:, 0] >= 0)
+                & (coords[:, 0] < weight_volume.shape[-3])
+                & (coords[:, 1] >= 0)
+                & (coords[:, 1] < weight_volume.shape[-2])
+                & (coords[:, 2] >= 0)
+                & (coords[:, 2] < weight_volume.shape[-1])
+            )
+            c = coords[valid]
+            if c.numel():
+                out[batch_idx, valid] = weight_volume[batch_idx, 0, c[:, 0], c[:, 1], c[:, 2]]
+        return out.clamp(0, 1)
 
     def _geometry_forward_chunked(self, tokens: Tensor, valid: Tensor) -> dict[str, Tensor]:
         chunk = int(self.config.dhga_boundary_chunk_size)

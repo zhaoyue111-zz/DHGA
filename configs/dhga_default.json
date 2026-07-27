@@ -44,7 +44,7 @@
   "dhga_corruption_modes": ["inward", "outward"],
   "dhga_boundary_recovery_weight": 1.0,
   "dhga_transport_equivariance_weight": 0.1,
-  "dhga_prompt_ranking_weight": 0.05,
+  "dhga_prompt_ranking_weight": 0.0,
   "dhga_minimal_transport_weight": 0.01,
   "dhga_transport_smoothness_weight": 0.0,
   "dhga_debug_outputs": false,
