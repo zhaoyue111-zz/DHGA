@@ -6,8 +6,14 @@ from torch import Tensor
 
 
 def make_ray_offsets_mm(search_radius_mm: float, step_mm: float, device: torch.device | None = None) -> Tensor:
-    steps = int(round(float(search_radius_mm) / float(step_mm)))
-    return torch.arange(-steps, steps + 1, device=device, dtype=torch.float32) * float(step_mm)
+    radius = float(search_radius_mm)
+    step = float(step_mm)
+    steps = int(torch.floor(torch.tensor(radius / step)).item())
+    offsets = torch.arange(-steps, steps + 1, device=device, dtype=torch.float32) * step
+    offsets = offsets[offsets.abs() <= radius + 1e-6]
+    if not torch.any(offsets == 0):
+        offsets = torch.sort(torch.cat([offsets, torch.zeros(1, device=device)])).values
+    return offsets
 
 
 def sample_along_normals(volume: Tensor, points_zyx: Tensor, normals_zyx: Tensor, offsets_mm: Tensor, spacing: tuple[float, float, float]) -> tuple[Tensor, Tensor]:

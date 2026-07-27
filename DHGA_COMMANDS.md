@@ -99,8 +99,10 @@ CUDA_VISIBLE_DEVICES=0 conda run -n voxtell python run_3d_dhga.py \
 CUDA_VISIBLE_DEVICES=0 conda run -n voxtell python run_3d_dhga.py \
   --train \
   --dhga_stage C \
+  --init_checkpoint .save/dhga/stage_b/checkpoint_final.pt \
   --dhga_geometry_enabled \
   --dhga_search_radius_mm 6.0 \
+  --dhga_surface_tolerance_mm 1.0 \
   --dhga_ray_step_mm 1.0 \
   --dhga_max_boundary_points 4096 \
   --dhga_boundary_chunk_size 1024 \
@@ -127,6 +129,7 @@ CUDA_VISIBLE_DEVICES=0 conda run -n voxtell python run_3d_dhga.py \
 CUDA_VISIBLE_DEVICES=0 conda run -n voxtell python run_3d_dhga.py \
   --train \
   --dhga_stage D \
+  --init_checkpoint .save/dhga/stage_c/checkpoint_final.pt \
   --dhga_geometry_enabled \
   --dhga_router_normalization case_rank \
   --dhga_boundary_chunk_size 1024 \
@@ -139,6 +142,27 @@ CUDA_VISIBLE_DEVICES=0 conda run -n voxtell python run_3d_dhga.py \
   --sequences P0 \
   --prompts liver \
   --prompt_templates "{}" \
+  --device cuda \
+  --epochs 10 \
+  --steps_per_volume 2
+```
+
+## Resume Interrupted Training
+
+Use `--resume_checkpoint` for the same stage. This restores model, optimizer, EMA, AMP scaler, epoch, global step, and RNG state.
+
+```bash
+CUDA_VISIBLE_DEVICES=0 conda run -n voxtell python run_3d_dhga.py \
+  --train \
+  --dhga_stage C \
+  --resume_checkpoint .save/dhga/stage_c/checkpoint_last.pt \
+  --save_dir .save/dhga/stage_c \
+  --voxtell_repo /data/zy/VoxTell_from_disk \
+  --model_dir /data/zy/VoxTell_from_disk/model \
+  --data_dir /data/zy/CT_MRI_DATA_3D/images/P0 \
+  --split_manifest /data/zy/MLMP/worst_zeroshot_split_p0/worst_zeroshot_split.json \
+  --sequences P0 \
+  --prompts liver \
   --device cuda \
   --epochs 10 \
   --steps_per_volume 2

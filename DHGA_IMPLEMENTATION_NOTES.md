@@ -20,14 +20,14 @@ The current DHGA code provides typed configuration, migrated VoxTell utility cod
 - `dhga/shared_voxtell.py`: defines `SharedVoxTellFeatures` and `SharedEncoderOnce`; experts consume explicit feature caches rather than hooks.
 - `dhga/experts/semantic_expert.py`: semantic expert wrapper for prompt-decoder-biased logits, intended to use cross-attention LoRA in `transformer_decoder.layers.*.multihead_attn`.
 - `dhga/experts/appearance_expert.py`: residual 3D feature adapters on selected shared skip features. Each adapter is channel bottleneck plus depthwise 3D convolution and is zero-initialized at the residual output.
-- `dhga/routing/disagreement_router.py`: continuous router from semantic probability, appearance probability, stability weights, and disagreement to stable foreground/background, disagreement weight, and initial fusion probability.
+- `dhga/routing/disagreement_router.py`: lightweight spatial router from semantic probability, appearance probability, stable foreground/background, and disagreement to per-voxel `w_sem(x)`, `w_app(x)`, `w_geo(x)`, consensus supervision weight, geometry disagreement weight, and initial fusion probability.
 - `dhga/geometry/sdf.py`: SDF uses one global convention: inside is negative, outside is positive.
 - `dhga/geometry/ray_sampler.py`: 3D ray sampling converts z,y,x voxel points to x,y,z `grid_sample` coordinates with `align_corners=True`; offsets are in millimeters and divided by per-axis spacing.
 - `dhga/geometry/boundary_corruption.py`: creates inward and outward SDF perturbations with recovery targets derived by sign convention.
-- `dhga/geometry/transport_head.py`: lightweight ray-token head initialized to a uniform offset distribution, making zero expected displacement when offsets are symmetric.
-- `dhga/geometry/boundary_points.py`: extracts physical narrow-band boundary points and scatters sparse predicted displacements back to a dense narrow-band displacement field.
-- `dhga/voxtell_model.py`: real VoxTell-backed DHGA model. One encoder pass builds a shared feature cache; semantic output uses prompt-decoder LoRA, appearance output uses residual skip adapters and the frozen decoder path; geometry receives image/probability/SDF/ray offset evidence plus prompt embeddings.
-- `dhga/trainer.py`: implements real Stage A/B/C/D training loops over unlabeled NIfTI volumes. Labels are not loaded by the trainer.
+- `dhga/geometry/transport_head.py`: lightweight ray-token head with an explicit zero-displacement center bias and fallback for fully invalid rays.
+- `dhga/geometry/boundary_points.py`: extracts zero-level-set surface points using `dhga_surface_tolerance_mm`; empty and full masks produce no valid surface. Sparse displacements are diffused back with a physical millimeter Gaussian kernel.
+- `dhga/voxtell_model.py`: real VoxTell-backed DHGA model. One encoder pass builds a shared feature cache; semantic output enables prompt-decoder LoRA, appearance output disables semantic LoRA and uses residual skip adapters, and anchor output disables both LoRA and appearance adapters. Geometry receives image/probability/SDF/ray offset evidence, prompt embeddings, and projected VoxTell intermediate visual features.
+- `dhga/trainer.py`: implements real Stage A/B/C/D training loops over unlabeled NIfTI volumes. Labels are not loaded by the trainer. `--init_checkpoint` transfers Stage B to C and Stage C to D; `--resume_checkpoint` restores model, optimizer, EMA, AMP scaler, epoch, global step, and RNG.
 - `dhga/losses.py`: cross-supervision is weighted by stable consensus and downweighted by disagreement, so high-disagreement voxels are not forced into agreement.
 - `dhga/checkpoint.py`: DHGA checkpoint payloads are versioned and loaded strictly; non-DHGA checkpoints are refused.
 
@@ -39,19 +39,18 @@ The current DHGA code provides typed configuration, migrated VoxTell utility cod
 - Normals: `[B, 1, D, H, W, 3]` in z,y,x axis order.
 - Ray points: `[B, N, 3]` in z,y,x voxel indices.
 - Ray samples: `[B, N, K, C]`, where `K = 2 * radius / step + 1`.
-- Ray tokens: `[B, N, K, 23]` by default: image intensity, semantic probability, appearance probability, disagreement, fused probability, SDF value, ray offset, and a 16-D projected prompt embedding.
+- Ray tokens: `[B, N, K, 31]` by default: image intensity, semantic probability, appearance probability, disagreement, fused probability, SDF value, 8-D projected VoxTell visual feature, ray offset, and a 16-D projected prompt embedding.
 - Sparse displacement: `[B, N]` in millimeters, scattered to dense `[B, 1, D, H, W]` in the narrow band.
 
 ## Gradient Flow And Freezing
 
 Default DHGA configuration sets `dhga_freeze_voxtell=True`. Trainable parameters are intended to be:
 
-- semantic expert adapters in the prompt decoder cross-attention path;
-- appearance residual feature adapters;
-- the continuous disagreement router;
-- the geometry transport head;
+- Stage B trains semantic prompt-decoder LoRA and appearance residual adapters.
+- Stage C freezes region experts and trains geometry visual projection, ray prompt projection, and transport head.
+- Stage D freezes region experts by default and trains spatial router plus geometry modules.
 - optional EMA teacher copies are updated without gradient.
-- prompt-conditioned ray token projection in the geometry path.
+- EMA teacher is used after `dhga_ema_warmup_steps` to provide weak-view stable consensus, anchor probabilities, and teacher SDFs.
 
 Frozen VoxTell encoder, text encoder, original prompt decoder base weights, and original segmentation decoder weights should not receive gradients. `trainable_parameter_summary` prints module-level trainable parameter names and counts for smoke/dry-run checks.
 
@@ -72,6 +71,10 @@ Frozen VoxTell encoder, text encoder, original prompt decoder base weights, and 
 - Stage B: semantic and appearance expert warm-up with frozen VoxTell anchor preservation, weak/strong intensity consistency, and stable-consensus cross supervision.
 - Stage C: self-supervised geometry pretraining from bidirectional SDF perturbation recovery. The target recovery displacement is derived from the known SDF perturbation sign.
 - Stage D: natural semantic-appearance disagreement routing plus one-step geometry decision with minimal transport regularization.
+
+## Spacing And Category Scope
+
+Reader spacing is read from NIfTI properties and converted from xyz metadata order to tensor zyx order before SDF, normals, rays, boundary perturbation, and dense displacement diffusion. Current DHGA geometry is explicitly single-class binary adaptation. Multi-class support should build per-class SDFs, boundary point sets, prompt-conditioned ray tokens, and losses.
 
 ## External References
 

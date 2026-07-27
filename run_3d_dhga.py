@@ -32,6 +32,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--weight_decay", type=float, default=0.0)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--max_cases", type=int, default=0)
+    parser.add_argument("--init_checkpoint", default="")
+    parser.add_argument("--resume_checkpoint", default="")
     parser.add_argument("--no_amp", action="store_true")
     parser.add_argument("--dhga_stage", choices=("A", "B", "C", "D"), default="B")
     parser.add_argument("--dhga_freeze_voxtell", action=argparse.BooleanOptionalAction, default=True)
@@ -48,9 +50,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dhga_router_normalization", choices=("case_rank", "none"), default="case_rank")
     parser.add_argument("--dhga_geometry_enabled", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--dhga_search_radius_mm", type=float, default=6.0)
+    parser.add_argument("--dhga_surface_tolerance_mm", type=float, default=1.0)
     parser.add_argument("--dhga_ray_step_mm", type=float, default=1.0)
     parser.add_argument("--dhga_max_boundary_points", type=int, default=4096)
     parser.add_argument("--dhga_boundary_chunk_size", type=int, default=1024)
+    parser.add_argument("--dhga_geometry_feature_layer", type=int, default=-1)
+    parser.add_argument("--dhga_geometry_feature_channels", type=int, default=8)
+    parser.add_argument("--dhga_displacement_diffusion_mm", type=float, default=2.0)
     parser.add_argument("--dhga_corruption_max_offset_mm", type=float, default=3.0)
     parser.add_argument("--dhga_corruption_modes", nargs="*", default=["inward", "outward"])
     parser.add_argument("--dhga_boundary_recovery_weight", type=float, default=1.0)
@@ -81,6 +87,8 @@ def config_from_args(args: argparse.Namespace) -> DHGAConfig:
         amp=not args.no_amp,
         seed=args.seed,
         max_cases=args.max_cases,
+        init_checkpoint=args.init_checkpoint,
+        resume_checkpoint=args.resume_checkpoint,
         dhga_stage=args.dhga_stage,
         dhga_freeze_voxtell=args.dhga_freeze_voxtell,
         dhga_semantic_adapter_rank=args.dhga_semantic_adapter_rank,
@@ -96,9 +104,13 @@ def config_from_args(args: argparse.Namespace) -> DHGAConfig:
         dhga_router_normalization=args.dhga_router_normalization,
         dhga_geometry_enabled=args.dhga_geometry_enabled,
         dhga_search_radius_mm=args.dhga_search_radius_mm,
+        dhga_surface_tolerance_mm=args.dhga_surface_tolerance_mm,
         dhga_ray_step_mm=args.dhga_ray_step_mm,
         dhga_max_boundary_points=args.dhga_max_boundary_points,
         dhga_boundary_chunk_size=args.dhga_boundary_chunk_size,
+        dhga_geometry_feature_layer=args.dhga_geometry_feature_layer,
+        dhga_geometry_feature_channels=args.dhga_geometry_feature_channels,
+        dhga_displacement_diffusion_mm=args.dhga_displacement_diffusion_mm,
         dhga_corruption_max_offset_mm=args.dhga_corruption_max_offset_mm,
         dhga_corruption_modes=list(args.dhga_corruption_modes),
         dhga_boundary_recovery_weight=args.dhga_boundary_recovery_weight,

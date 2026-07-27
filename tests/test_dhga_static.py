@@ -4,11 +4,12 @@ import unittest
 
 import torch
 
-from dhga.checkpoint import load_dhga_checkpoint, save_dhga_checkpoint
+from dhga.checkpoint import load_dhga_checkpoint, load_training_checkpoint, save_dhga_checkpoint, save_training_checkpoint
 from dhga.config import DHGAConfig
 from dhga.experts import AppearanceExpert, SemanticExpert
-from dhga.geometry.boundary_corruption import make_bidirectional_corruption
+from dhga.geometry.boundary_corruption import make_bidirectional_corruption, make_local_boundary_corruption
 from dhga.geometry.ray_sampler import make_ray_offsets_mm, sample_along_normals
+from dhga.geometry.transport_head import GeometryTransportHead
 from dhga.geometry.boundary_points import extract_boundary_points, sparse_displacements_to_dense_narrowband
 from dhga.geometry.sdf import mask_to_sdf, sdf_normals, update_sdf_with_displacement
 from dhga.inference import finalize_mask
@@ -42,8 +43,13 @@ class DHGAStaticTests(unittest.TestCase):
         points, normals, valid = extract_boundary_points(sdf, 1.5, 32)
         self.assertEqual(points.shape, (1, 32, 3))
         self.assertEqual(normals.shape, (1, 32, 3))
-        dense = sparse_displacements_to_dense_narrowband(points, torch.ones(1, 32), valid, (7, 7, 7))
+        dense = sparse_displacements_to_dense_narrowband(points, torch.ones(1, 32), valid, (7, 7, 7), spacing=(1.0, 1.0, 2.0), diffusion_mm=2.0)
         self.assertGreater(float(dense.abs().sum()), 0.0)
+
+    def test_empty_or_full_mask_has_no_boundary(self):
+        sdf = mask_to_sdf(torch.zeros(1, 1, 5, 5, 5, dtype=torch.bool))
+        _, _, valid = extract_boundary_points(sdf, 1.0, 8)
+        self.assertFalse(bool(valid.any()))
 
     def test_ray_sampler_coordinate_order_and_spacing(self):
         volume = torch.zeros(1, 1, 5, 6, 7)
@@ -55,13 +61,28 @@ class DHGAStaticTests(unittest.TestCase):
         self.assertTrue(bool(valid.all()))
         self.assertAlmostEqual(float(samples[0, 0, 1, 0]), 1.0, places=5)
 
+    def test_ray_offsets_do_not_exceed_radius_and_include_zero(self):
+        offsets = make_ray_offsets_mm(5.5, 2.0)
+        self.assertTrue(bool((offsets.abs() <= 5.5 + 1e-6).all()))
+        self.assertTrue(bool((offsets == 0).any()))
+
     def test_bidirectional_corruption_recovery_sign(self):
-        sdf = torch.zeros(8, 1, 3, 3, 3)
+        sdf = torch.zeros(8, 1, 7, 7, 7)
         corrupted, target, _ = make_bidirectional_corruption(sdf, 2.0, ["outward", "inward"])
         perturb = sdf - corrupted
         nonzero = perturb.abs() > 0
         self.assertTrue(bool(nonzero.any()))
         self.assertTrue(torch.allclose(target[nonzero], -perturb[nonzero]))
+
+    def test_local_corruption_has_positive_negative_zero_regions(self):
+        sdf = torch.randn(2, 1, 12, 12, 12)
+        corrupted, target, choices = make_local_boundary_corruption(sdf, 2.0, ["inward", "outward", "zero"])
+        perturb = sdf - corrupted
+        self.assertTrue(bool((perturb > 0).any()))
+        self.assertTrue(bool((perturb < 0).any()))
+        self.assertTrue(bool((perturb == 0).any()))
+        self.assertTrue(torch.allclose(target, -perturb))
+        self.assertEqual(choices.shape[-1], 3)
 
     def test_shared_encoder_called_once_for_two_experts(self):
         shared = SharedEncoderOnce(torch.nn.Conv3d(1, 2, 1))
@@ -104,6 +125,37 @@ class DHGAStaticTests(unittest.TestCase):
             save_dhga_checkpoint(path, modules, config, {"stage": "test"})
             payload = load_dhga_checkpoint(path, modules)
         self.assertEqual(payload["format"], "dhga_checkpoint_v1")
+
+    def test_training_checkpoint_restores_optimizer_ema_scaler_and_step(self):
+        config = DHGAConfig()
+        model = DHGASmokeModel(config)
+        optim = torch.optim.AdamW(model.parameters(), lr=1e-3)
+        scaler = torch.amp.GradScaler("cuda", enabled=False)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "train.pt"
+            save_training_checkpoint(path, model, config, optimizer=optim, ema=model, scaler=scaler, epoch=3, global_step=17)
+            payload = load_training_checkpoint(path, model, optim, model, scaler)
+        self.assertEqual(int(payload["epoch"]), 3)
+        self.assertEqual(int(payload["global_step"]), 17)
+
+    def test_invalid_ray_keeps_near_zero_displacement(self):
+        offsets = make_ray_offsets_mm(2.0, 1.0)
+        head = GeometryTransportHead(3, offsets)
+        tokens = torch.randn(1, 4, offsets.numel(), 3)
+        valid = torch.zeros(1, 4, offsets.numel(), dtype=torch.bool)
+        out = head(tokens, valid)
+        self.assertLess(float(out["expected_displacement_mm"].detach().abs().max()), 0.2)
+
+    def test_geometry_chunk_matches_full(self):
+        offsets = make_ray_offsets_mm(2.0, 1.0)
+        head = GeometryTransportHead(3, offsets)
+        tokens = torch.randn(1, 6, offsets.numel(), 3)
+        valid = torch.ones(1, 6, offsets.numel(), dtype=torch.bool)
+        full = head(tokens, valid)["expected_displacement_mm"]
+        parts = []
+        for start in range(0, 6, 2):
+            parts.append(head(tokens[:, start:start + 2], valid[:, start:start + 2])["expected_displacement_mm"])
+        self.assertTrue(torch.allclose(full, torch.cat(parts, dim=1)))
 
     def test_synthetic_smoke(self):
         result = run_synthetic_smoke(DHGAConfig(), "cpu")

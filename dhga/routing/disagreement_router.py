@@ -13,6 +13,11 @@ class RouterOutput:
     disagreement: Tensor
     fused_prob: Tensor
     consensus_mask: Tensor
+    cross_supervision_weight: Tensor
+    geometry_disagreement_weight: Tensor
+    w_sem: Tensor
+    w_app: Tensor
+    w_geo: Tensor
 
 
 def _case_rank_normalize(x: Tensor) -> Tensor:
@@ -38,7 +43,13 @@ class DisagreementRouter(nn.Module):
         self.foreground_quantile = foreground_quantile
         self.background_quantile = background_quantile
         self.disagreement_quantile = disagreement_quantile
-        self.fusion_logit = nn.Parameter(torch.zeros(2))
+        self.spatial_head = nn.Sequential(
+            nn.Conv3d(5, 8, kernel_size=3, padding=1),
+            nn.GELU(),
+            nn.Conv3d(8, 3, kernel_size=1),
+        )
+        nn.init.zeros_(self.spatial_head[-1].weight)
+        nn.init.zeros_(self.spatial_head[-1].bias)
 
     def forward(self, sem_prob: Tensor, app_prob: Tensor, sem_stability: Tensor | None = None, app_stability: Tensor | None = None) -> RouterOutput:
         if sem_prob.shape != app_prob.shape:
@@ -62,9 +73,27 @@ class DisagreementRouter(nn.Module):
             disagreement_weight = disagreement.clamp(0, 1)
         else:
             raise ValueError("normalization must be case_rank or none")
-        weights = self.fusion_logit.softmax(dim=0)
-        fused = weights[0] * sem_prob + weights[1] * app_prob
+        route_features = torch.cat([sem_prob, app_prob, disagreement_weight, stable_foreground, stable_background], dim=1)
+        weights = self.spatial_head(route_features).softmax(dim=1)
+        w_sem = weights[:, 0:1]
+        w_app = weights[:, 1:2]
+        w_geo = weights[:, 2:3]
+        fused = w_sem * sem_prob + w_app * app_prob
         consensus_mask = (stable_foreground > stable_background) & (
             disagreement_weight < disagreement_weight.flatten(2).quantile(self.disagreement_quantile, dim=-1, keepdim=True).view(*disagreement_weight.shape[:2], 1, 1, 1)
         )
-        return RouterOutput(stable_foreground, stable_background, disagreement_weight, fused.clamp(0, 1), consensus_mask)
+        low_disagreement_gate = (0.5 - disagreement_weight).clamp_min(0.0) * 2.0
+        consensus_weight = (stable_foreground + stable_background).clamp(0, 1) * low_disagreement_gate
+        geometry_weight = (w_geo * disagreement_weight).clamp(0, 1)
+        return RouterOutput(
+            stable_foreground,
+            stable_background,
+            disagreement_weight,
+            fused.clamp(0, 1),
+            consensus_mask,
+            consensus_weight,
+            geometry_weight,
+            w_sem,
+            w_app,
+            w_geo,
+        )

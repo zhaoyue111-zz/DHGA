@@ -16,6 +16,12 @@ def extract_boundary_points(
     """Return padded boundary point coordinates and normals in z,y,x order."""
     if sdf.ndim != 5 or sdf.shape[1] != 1:
         raise ValueError("sdf must have shape [B, 1, D, H, W]")
+    if torch.all(sdf < 0) or torch.all(sdf > 0):
+        bsz = sdf.shape[0]
+        points = torch.zeros((bsz, max_points, 3), device=sdf.device, dtype=torch.float32)
+        normals = torch.zeros_like(points)
+        valid = torch.zeros((bsz, max_points), device=sdf.device, dtype=torch.bool)
+        return points, normals, valid
     band = boundary_band(sdf, radius_mm)
     normals_grid = sdf_normals(sdf, spacing).squeeze(1)
     batch_points = []
@@ -24,11 +30,11 @@ def extract_boundary_points(
     for batch_idx in range(sdf.shape[0]):
         coords = band[batch_idx, 0].nonzero(as_tuple=False)
         if coords.numel() == 0:
-            coords = torch.tensor([[s // 2 for s in sdf.shape[-3:]]], device=sdf.device, dtype=torch.long)
+            coords = torch.zeros((0, 3), device=sdf.device, dtype=torch.long)
         if coords.shape[0] > max_points:
             order = torch.randperm(coords.shape[0], device=sdf.device)[:max_points]
             coords = coords[order]
-        normals = normals_grid[batch_idx, coords[:, 0], coords[:, 1], coords[:, 2]]
+        normals = normals_grid[batch_idx, coords[:, 0], coords[:, 1], coords[:, 2]] if coords.numel() else torch.zeros((0, 3), device=sdf.device)
         valid = torch.ones(coords.shape[0], device=sdf.device, dtype=torch.bool)
         pad = max_points - coords.shape[0]
         if pad > 0:
@@ -46,17 +52,26 @@ def sparse_displacements_to_dense_narrowband(
     displacements_mm: Tensor,
     valid_points: Tensor,
     spatial_shape: tuple[int, int, int],
-    radius_voxels: int = 1,
+    spacing: tuple[float, float, float] = (1.0, 1.0, 1.0),
+    diffusion_mm: float = 2.0,
 ) -> Tensor:
-    """Scatter sparse point displacements into a dense narrow-band volume."""
+    """Scatter sparse point displacements into a dense narrow-band volume with a physical Gaussian kernel."""
     bsz, _, _ = points_zyx.shape
     dense = torch.zeros((bsz, 1, *spatial_shape), device=points_zyx.device, dtype=displacements_mm.dtype)
     counts = torch.zeros_like(dense)
     rounded = points_zyx.round().long()
-    for dz in range(-radius_voxels, radius_voxels + 1):
-        for dy in range(-radius_voxels, radius_voxels + 1):
-            for dx in range(-radius_voxels, radius_voxels + 1):
-                coords = rounded + torch.tensor([dz, dy, dx], device=rounded.device)
+    spacing_t = torch.tensor(spacing, device=points_zyx.device, dtype=displacements_mm.dtype)
+    max_vox = [max(1, int(torch.ceil(torch.tensor(diffusion_mm / max(s, 1e-6))).item())) for s in spacing]
+    sigma2 = float(diffusion_mm) ** 2
+    for dz in range(-max_vox[0], max_vox[0] + 1):
+        for dy in range(-max_vox[1], max_vox[1] + 1):
+            for dx in range(-max_vox[2], max_vox[2] + 1):
+                delta = torch.tensor([dz, dy, dx], device=rounded.device)
+                dist2 = ((delta.to(displacements_mm.dtype) * spacing_t) ** 2).sum()
+                if float(dist2) > (float(diffusion_mm) ** 2):
+                    continue
+                kernel_weight = torch.exp(-0.5 * dist2 / max(sigma2, 1e-6)).to(displacements_mm.dtype)
+                coords = rounded + delta
                 in_bounds = (
                     valid_points
                     & (coords[..., 0] >= 0)
@@ -71,6 +86,6 @@ def sparse_displacements_to_dense_narrowband(
                     if c.numel() == 0:
                         continue
                     values = displacements_mm[batch_idx, in_bounds[batch_idx]]
-                    dense[batch_idx, 0, c[:, 0], c[:, 1], c[:, 2]] += values
-                    counts[batch_idx, 0, c[:, 0], c[:, 1], c[:, 2]] += 1
+                    dense[batch_idx, 0, c[:, 0], c[:, 1], c[:, 2]] += values * kernel_weight
+                    counts[batch_idx, 0, c[:, 0], c[:, 1], c[:, 2]] += kernel_weight
     return dense / counts.clamp_min(1.0)

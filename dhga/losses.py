@@ -14,8 +14,7 @@ def weighted_bce_prob(student_prob: Tensor, teacher_prob: Tensor, weight: Tensor
 
 
 def cross_supervision_loss(sem_prob: Tensor, app_prob: Tensor, router: RouterOutput) -> Tensor:
-    consensus = (router.disagreement < 0.5).to(sem_prob.dtype)
-    weight = (router.stable_foreground + router.stable_background) * (1.0 - router.disagreement) * consensus
+    weight = router.cross_supervision_weight
     sem_to_app = weighted_bce_prob(sem_prob, app_prob.detach(), weight)
     app_to_sem = weighted_bce_prob(app_prob, sem_prob.detach(), weight)
     return 0.5 * (sem_to_app + app_to_sem)

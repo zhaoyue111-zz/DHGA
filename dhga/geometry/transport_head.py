@@ -20,14 +20,21 @@ class GeometryTransportHead(nn.Module):
         )
         nn.init.zeros_(self.net[-1].weight)
         nn.init.zeros_(self.net[-1].bias)
+        center = int(torch.argmin(self.offsets_mm.abs()).item())
+        self.center_index = center
+        self.center_bias = nn.Parameter(torch.tensor(4.0))
 
     def forward(self, ray_tokens: Tensor, valid_mask: Tensor | None = None) -> dict[str, Tensor]:
         if ray_tokens.ndim != 4:
             raise ValueError("ray_tokens must have shape [B, N, K, C]")
         bsz, n_points, n_offsets, channels = ray_tokens.shape
         logits = self.net(ray_tokens.view(bsz * n_points, n_offsets, channels).permute(0, 2, 1)).squeeze(1)
+        logits[:, self.center_index] = logits[:, self.center_index] + self.center_bias.to(logits.dtype)
         if valid_mask is not None:
-            logits = logits.masked_fill(~valid_mask.view(bsz * n_points, n_offsets), -1e4)
+            flat_valid = valid_mask.view(bsz * n_points, n_offsets)
+            any_valid = flat_valid.any(dim=-1, keepdim=True)
+            flat_valid = torch.where(any_valid, flat_valid, torch.zeros_like(flat_valid).scatter(1, torch.full((flat_valid.shape[0], 1), self.center_index, device=flat_valid.device), True))
+            logits = logits.masked_fill(~flat_valid, -1e4)
         probs = F.softmax(logits, dim=-1).view(bsz, n_points, n_offsets)
         offsets = self.offsets_mm.to(device=ray_tokens.device, dtype=ray_tokens.dtype)
         expected = (probs * offsets.view(1, 1, -1)).sum(dim=-1)

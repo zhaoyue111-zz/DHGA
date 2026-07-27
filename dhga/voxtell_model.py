@@ -54,6 +54,7 @@ class PromptConditionedRayTokens(nn.Module):
         sampled_disagreement: Tensor,
         sampled_fused: Tensor,
         sampled_sdf: Tensor,
+        sampled_visual: Tensor,
         offsets_mm: Tensor,
         prompt_embedding: Tensor,
     ) -> Tensor:
@@ -76,6 +77,7 @@ class PromptConditionedRayTokens(nn.Module):
                 sampled_disagreement.float(),
                 sampled_fused.float(),
                 sampled_sdf.float(),
+                sampled_visual.float(),
                 offsets.float(),
                 prompt.float(),
             ],
@@ -115,7 +117,9 @@ class DHGAVoxTellModel(nn.Module):
         self.router = DisagreementRouter(config.dhga_router_normalization)
         self.ray_offsets_mm = make_ray_offsets_mm(config.dhga_search_radius_mm, config.dhga_ray_step_mm)
         self.ray_tokens = PromptConditionedRayTokens(text_embeddings.shape[-1])
-        token_dim = 1 + 1 + 1 + 1 + 1 + 1 + 1 + 16
+        visual_channels = self._feature_channels_for_layer(channels, config.dhga_geometry_feature_layer)
+        self.geometry_visual_proj = nn.Conv3d(visual_channels, config.dhga_geometry_feature_channels, kernel_size=1)
+        token_dim = 1 + 1 + 1 + 1 + 1 + 1 + config.dhga_geometry_feature_channels + 1 + 16
         self.geometry_head = GeometryTransportHead(token_dim, self.ray_offsets_mm)
 
     @classmethod
@@ -167,14 +171,30 @@ class DHGAVoxTellModel(nn.Module):
             for name, value in old.items():
                 self.injected_lora[name].scaling = value
 
+    @contextmanager
+    def appearance_disabled(self):
+        old_training = self.appearance_expert.training
+        old_requires_grad = [param.requires_grad for param in self.appearance_expert.parameters()]
+        self.appearance_expert.eval()
+        for param in self.appearance_expert.parameters():
+            param.requires_grad_(False)
+        try:
+            yield
+        finally:
+            for param, state in zip(self.appearance_expert.parameters(), old_requires_grad):
+                param.requires_grad_(state)
+            self.appearance_expert.train(old_training)
+
     def forward(self, image: Tensor, spacing: tuple[float, float, float] = (1.0, 1.0, 1.0), run_geometry: bool = True) -> DHGAForwardOutput:
         features = self.encode_once(image, spacing)
         semantic_logits, projected_prompt = self.decode_from_features(features.encoder_stages, features.selected_feature)
-        app_features = self.appearance_expert.adapt_features(features, self.config.dhga_appearance_feature_dropout)
-        appearance_logits, _ = self.decode_from_features(app_features.encoder_stages, app_features.selected_feature)
+        with self.lora_disabled():
+            app_features = self.appearance_expert.adapt_features(features, self.config.dhga_appearance_feature_dropout)
+            appearance_logits, _ = self.decode_from_features(app_features.encoder_stages, app_features.selected_feature)
         sem_prob = self._class_probs(semantic_logits)
         app_prob = self._class_probs(appearance_logits)
-        with torch.no_grad(), self.lora_disabled():
+        self._last_geometry_feature = features.encoder_stages[self.geometry_feature_idx]
+        with torch.no_grad(), self.lora_disabled(), self.appearance_disabled():
             anchor_logits, _ = self.decode_from_features(features.encoder_stages, features.selected_feature)
             anchor_prob = self._class_probs(anchor_logits)
         router = self.router(sem_prob, app_prob)
@@ -198,13 +218,14 @@ class DHGAVoxTellModel(nn.Module):
     def encode_once(self, image: Tensor, spacing: tuple[float, float, float]) -> SharedVoxTellFeatures:
         self.encoder_calls += 1
         selected_stages: list[int] = []
-        skips, selected_feature = self._encoder_selected_skips(image, selected_stages)
+        skips, selected_feature, selected_idx = self._encoder_selected_skips(image, selected_stages)
         return SharedVoxTellFeatures(
             image=image,
             encoder_stages=skips,
             selected_feature=selected_feature,
             spacing=spacing,
             original_shape=tuple(image.shape[-3:]),
+            metadata={"selected_feature_idx": selected_idx},
         )
 
     def decode_from_features(self, skips: list[Tensor], selected_feature: Tensor | None) -> tuple[Tensor, Tensor]:
@@ -260,7 +281,7 @@ class DHGAVoxTellModel(nn.Module):
         sdf = initial_sdf if initial_sdf is not None else mask_to_sdf(router.fused_prob >= self.config.pred_threshold, spacing)
         points, normals, valid_points = extract_boundary_points(
             sdf,
-            self.config.dhga_search_radius_mm,
+            self.config.dhga_surface_tolerance_mm,
             self.config.dhga_max_boundary_points,
             spacing,
         )
@@ -271,7 +292,9 @@ class DHGAVoxTellModel(nn.Module):
         sampled_dis, valid_dis = sample_along_normals(router.disagreement, points, normals, offsets, spacing)
         sampled_fused, valid_fused = sample_along_normals(router.fused_prob, points, normals, offsets, spacing)
         sampled_sdf, valid_sdf = sample_along_normals(sdf, points, normals, offsets, spacing)
-        valid = valid_ray & valid_sem & valid_app & valid_dis & valid_fused & valid_sdf & valid_points.unsqueeze(-1)
+        visual_feature = self.geometry_visual_proj(self._last_geometry_feature)
+        sampled_visual, valid_visual = self._sample_visual_feature(visual_feature, points, normals, offsets, spacing, tuple(image.shape[-3:]))
+        valid = valid_ray & valid_sem & valid_app & valid_dis & valid_fused & valid_sdf & valid_visual & valid_points.unsqueeze(-1)
         tokens = self.ray_tokens(
             sampled_image,
             sampled_sem,
@@ -279,16 +302,18 @@ class DHGAVoxTellModel(nn.Module):
             sampled_dis,
             sampled_fused,
             sampled_sdf,
+            sampled_visual,
             offsets,
             prompt_embedding,
         )
-        pred = self.geometry_head(tokens, valid)
+        pred = self._geometry_forward_chunked(tokens, valid)
         dense = sparse_displacements_to_dense_narrowband(
             points,
             pred["expected_displacement_mm"],
             valid_points,
             tuple(image.shape[-3:]),
-            radius_voxels=1,
+            spacing=spacing,
+            diffusion_mm=self.config.dhga_displacement_diffusion_mm,
         )
         return {
             "sdf": sdf,
@@ -302,13 +327,46 @@ class DHGAVoxTellModel(nn.Module):
             "displacement_entropy": pred["entropy"],
         }
 
+    def _geometry_forward_chunked(self, tokens: Tensor, valid: Tensor) -> dict[str, Tensor]:
+        chunk = int(self.config.dhga_boundary_chunk_size)
+        if tokens.shape[1] <= chunk:
+            return self.geometry_head(tokens, valid)
+        outputs: dict[str, list[Tensor]] = {"logits": [], "prob": [], "expected_displacement_mm": [], "entropy": []}
+        for start in range(0, tokens.shape[1], chunk):
+            part = self.geometry_head(tokens[:, start : start + chunk], valid[:, start : start + chunk])
+            for key in outputs:
+                outputs[key].append(part[key])
+        return {key: torch.cat(values, dim=1) for key, values in outputs.items()}
+
+    def _sample_visual_feature(
+        self,
+        visual_feature: Tensor,
+        points: Tensor,
+        normals: Tensor,
+        offsets: Tensor,
+        spacing: tuple[float, float, float],
+        image_shape: tuple[int, int, int],
+    ) -> tuple[Tensor, Tensor]:
+        scale = torch.tensor(
+            [
+                (visual_feature.shape[-3] - 1) / max(image_shape[0] - 1, 1),
+                (visual_feature.shape[-2] - 1) / max(image_shape[1] - 1, 1),
+                (visual_feature.shape[-1] - 1) / max(image_shape[2] - 1, 1),
+            ],
+            device=points.device,
+            dtype=points.dtype,
+        )
+        feature_points = points * scale.view(1, 1, 3)
+        feature_spacing = tuple(float(spacing[idx]) / max(float(scale[idx]), 1e-6) for idx in range(3))
+        return sample_along_normals(visual_feature, feature_points, normals, offsets, feature_spacing)
+
     def _class_probs(self, logits: Tensor) -> Tensor:
         probs = logits.float().sigmoid()
         if self.num_templates > 1:
             probs = probs.view(probs.shape[0], self.num_classes, self.num_templates, *probs.shape[2:]).mean(dim=2)
         return probs
 
-    def _encoder_selected_skips(self, patch: Tensor, selected_decoder_stages: list[int]) -> tuple[list[Tensor], Tensor]:
+    def _encoder_selected_skips(self, patch: Tensor, selected_decoder_stages: list[int]) -> tuple[list[Tensor], Tensor, int]:
         encoder = self.network.encoder
         num_encoder_stages = len(encoder.stages)
         selected_feature_idx = int(self.network.selected_decoder_layer)
@@ -330,7 +388,14 @@ class DHGAVoxTellModel(nn.Module):
                 skips.append(x)
         if selected_feature is None:
             raise RuntimeError(f"selected_decoder_layer={self.network.selected_decoder_layer} was not produced")
-        return skips, selected_feature
+        return skips, selected_feature, selected_feature_idx
+
+    def _feature_channels_for_layer(self, channels: list[int], raw_idx: int) -> int:
+        idx = raw_idx if raw_idx >= 0 else len(channels) + raw_idx
+        if idx < 0 or idx >= len(channels):
+            raise ValueError(f"geometry feature layer {raw_idx} is outside {len(channels)} stages")
+        self.geometry_feature_idx = idx
+        return channels[idx]
 
     def _pos_embed_for_shape(self, h_dim: int, w_dim: int, d_dim: int, c_dim: int, reference: Tensor) -> Tensor:
         expected_tokens = h_dim * w_dim * d_dim

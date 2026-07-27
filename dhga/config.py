@@ -22,6 +22,9 @@ class DHGAConfig:
     amp: bool = True
     seed: int = 0
     max_cases: int = 0
+    init_checkpoint: str = ""
+    resume_checkpoint: str = ""
+    dhga_ema_warmup_steps: int = 10
     dhga_enabled: bool = True
     dhga_stage: str = "B"
     dhga_freeze_voxtell: bool = True
@@ -38,9 +41,13 @@ class DHGAConfig:
     dhga_router_normalization: str = "case_rank"
     dhga_geometry_enabled: bool = True
     dhga_search_radius_mm: float = 6.0
+    dhga_surface_tolerance_mm: float = 1.0
     dhga_ray_step_mm: float = 1.0
     dhga_max_boundary_points: int = 4096
     dhga_boundary_chunk_size: int = 1024
+    dhga_geometry_feature_layer: int = -1
+    dhga_geometry_feature_channels: int = 8
+    dhga_displacement_diffusion_mm: float = 2.0
     dhga_corruption_max_offset_mm: float = 3.0
     dhga_corruption_modes: list[str] = field(default_factory=lambda: ["inward", "outward"])
     dhga_boundary_recovery_weight: float = 1.0
@@ -70,6 +77,14 @@ class DHGAConfig:
             raise ValueError("dhga_router_normalization must be case_rank or none")
         if self.dhga_search_radius_mm <= 0 or self.dhga_ray_step_mm <= 0:
             raise ValueError("ray radius and step must be positive")
+        if self.dhga_surface_tolerance_mm <= 0:
+            raise ValueError("surface tolerance must be positive")
+        if self.dhga_surface_tolerance_mm > self.dhga_search_radius_mm:
+            raise ValueError("surface tolerance must not exceed ray search radius")
+        if self.dhga_geometry_feature_channels <= 0:
+            raise ValueError("dhga_geometry_feature_channels must be positive")
+        if self.dhga_displacement_diffusion_mm <= 0:
+            raise ValueError("dhga_displacement_diffusion_mm must be positive")
         if self.dhga_boundary_chunk_size <= 0 or self.dhga_max_boundary_points <= 0:
             raise ValueError("boundary chunk and max points must be positive")
         if self.dhga_corruption_max_offset_mm <= 0:
