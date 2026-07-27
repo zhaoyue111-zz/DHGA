@@ -2,6 +2,6 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .mypy_cache/
-.save/
 save/
 *.log
+*.pt

@@ -4,18 +4,10 @@
     <option name="autoReloadType" value="ALL" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="6fb578aa-0101-4d98-adb8-1c85a67dd3aa" name="Changes" comment="add voxtell_sfda module">
-      <change beforePath="$PROJECT_DIR$/DHGA_COMMANDS.md" beforeDir="false" afterPath="$PROJECT_DIR$/DHGA_COMMANDS.md" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/DHGA_IMPLEMENTATION_NOTES.md" beforeDir="false" afterPath="$PROJECT_DIR$/DHGA_IMPLEMENTATION_NOTES.md" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/dhga/checkpoint.py" beforeDir="false" afterPath="$PROJECT_DIR$/dhga/checkpoint.py" afterDir="false" />
+    <list default="true" id="6fb578aa-0101-4d98-adb8-1c85a67dd3aa" name="Changes" comment="refix">
       <change beforePath="$PROJECT_DIR$/dhga/config.py" beforeDir="false" afterPath="$PROJECT_DIR$/dhga/config.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/dhga/evaluation.py" beforeDir="false" afterPath="$PROJECT_DIR$/dhga/evaluation.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/dhga/geometry/boundary_corruption.py" beforeDir="false" afterPath="$PROJECT_DIR$/dhga/geometry/boundary_corruption.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/dhga/geometry/transport_head.py" beforeDir="false" afterPath="$PROJECT_DIR$/dhga/geometry/transport_head.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/dhga/losses.py" beforeDir="false" afterPath="$PROJECT_DIR$/dhga/losses.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/dhga/routing/disagreement_router.py" beforeDir="false" afterPath="$PROJECT_DIR$/dhga/routing/disagreement_router.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/dhga/trainer.py" beforeDir="false" afterPath="$PROJECT_DIR$/dhga/trainer.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/dhga/voxtell_model.py" beforeDir="false" afterPath="$PROJECT_DIR$/dhga/voxtell_model.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/run_3d_dhga.py" beforeDir="false" afterPath="$PROJECT_DIR$/run_3d_dhga.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/tests/test_dhga_static.py" beforeDir="false" afterPath="$PROJECT_DIR$/tests/test_dhga_static.py" afterDir="false" />
     </list>
@@ -99,7 +91,7 @@
       <option name="number" value="Default" />
       <option name="presentableId" value="Default" />
       <updated>1785146243950</updated>
-      <workItem from="1785146244991" duration="4290000" />
+      <workItem from="1785146244991" duration="8555000" />
     </task>
     <task id="LOCAL-00001" summary="add voxtell_sfda module">
       <option name="closed" value="true" />
@@ -109,7 +101,23 @@
       <option name="project" value="LOCAL" />
       <updated>1785148654208</updated>
     </task>
-    <option name="localTasksCounter" value="2" />
+    <task id="LOCAL-00002" summary="refix">
+      <option name="closed" value="true" />
+      <created>1785153624861</created>
+      <option name="number" value="00002" />
+      <option name="presentableId" value="LOCAL-00002" />
+      <option name="project" value="LOCAL" />
+      <updated>1785153624861</updated>
+    </task>
+    <task id="LOCAL-00003" summary="refix">
+      <option name="closed" value="true" />
+      <created>1785153647314</created>
+      <option name="number" value="00003" />
+      <option name="presentableId" value="LOCAL-00003" />
+      <option name="project" value="LOCAL" />
+      <updated>1785153647314</updated>
+    </task>
+    <option name="localTasksCounter" value="4" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -117,7 +125,8 @@
   </component>
   <component name="VcsManagerConfiguration">
     <MESSAGE value="add voxtell_sfda module" />
-    <option name="LAST_COMMIT_MESSAGE" value="add voxtell_sfda module" />
+    <MESSAGE value="refix" />
+    <option name="LAST_COMMIT_MESSAGE" value="refix" />
   </component>
   <component name="github-copilot-workspace">
     <instructionFileLocations>
