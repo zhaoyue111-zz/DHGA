@@ -351,20 +351,35 @@ class DHGAStaticTests(unittest.TestCase):
                 return SimpleNamespace(anchor_prob=prob)
 
         trainer = DHGAStageTrainer.__new__(DHGAStageTrainer)
-        trainer.config = DHGAConfig(dhga_stage_b_anchor_candidate_patches=3, dhga_stage_b_include_background_patch=True)
+        trainer.config = DHGAConfig(steps_per_volume=3, dhga_stage_b_anchor_candidate_patches=4, dhga_stage_b_include_background_patch=True)
         trainer.model = FakeAnchor()
         trainer.device = torch.device("cpu")
-        volume = torch.zeros(1, 3, 2, 2)
+        trainer.stage_b_anchor_cache = {}
+        volume = torch.zeros(1, 4, 2, 2)
         volume[:, 0] = 0.95
         volume[:, 1] = 0.50
         volume[:, 2] = 0.05
+        volume[:, 3] = 0.0
         slicers = [
             (slice(None), slice(0, 1), slice(None), slice(None)),
             (slice(None), slice(1, 2), slice(None), slice(None)),
             (slice(None), slice(2, 3), slice(None), slice(None)),
+            (slice(None), slice(3, 4), slice(None), slice(None)),
         ]
-        selected = trainer._stage_b_anchor_guided_slicers(volume, (1.0, 1.0, 1.0), slicers)
+        selected = trainer._stage_b_anchor_guided_slicers("case_a", volume, (1.0, 1.0, 1.0), slicers)
         self.assertEqual([kind for _, kind in selected], ["foreground", "boundary", "background"])
+        self.assertEqual(selected[2][0], slicers[2])
+        cached = trainer._stage_b_anchor_guided_slicers("case_a", volume * 0, (1.0, 1.0, 1.0), list(reversed(slicers)))
+        self.assertEqual(cached, selected)
+
+    def test_epoch_metrics_include_distribution_summary(self):
+        trainer = DHGAStageTrainer.__new__(DHGAStageTrainer)
+        trainer.writer = None
+        metrics = trainer._log_epoch_metrics(1, [{"loss": 1.0}, {"loss": 2.0}, {"loss": 10.0}])
+        self.assertEqual(metrics["epoch_loss_mean"], 13.0 / 3.0)
+        self.assertEqual(metrics["epoch_loss_median"], 2.0)
+        self.assertEqual(metrics["epoch_loss_p90"], 2.0)
+        self.assertEqual(metrics["epoch_loss_max"], 10.0)
 
     def test_stage_trainable_parameter_sets(self):
         class FakeLoRA(torch.nn.Module):

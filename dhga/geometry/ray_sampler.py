@@ -6,6 +6,9 @@ from torch import Tensor
 
 
 def make_ray_offsets_mm(search_radius_mm: float, step_mm: float, device: torch.device | None = None) -> Tensor:
+    '''
+    以 0 为中心，正负双向均匀采样一堆坐标步长，所有偏移量绝对值不超过设定搜索半径，保证一定会包含中心点 0 偏移
+    '''
     radius = float(search_radius_mm)
     step = float(step_mm)
     steps = int(torch.floor(torch.tensor(radius / step)).item())

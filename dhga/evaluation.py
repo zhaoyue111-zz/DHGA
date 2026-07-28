@@ -24,12 +24,24 @@ def spacing_from_reader_properties(props: dict) -> tuple[float, float, float]:
 
 
 class DHGAEvaluator:
-    def __init__(self, config: DHGAConfig, prompts: list[str], save_dir: str | Path, label_dir: str = "", label_values: list[int] | None = None) -> None:
+    def __init__(
+        self,
+        config: DHGAConfig,
+        prompts: list[str],
+        save_dir: str | Path,
+        label_dir: str = "",
+        label_values: list[int] | None = None,
+        model=None,
+        predictor=None,
+    ) -> None:
         self.config = config
         self.save_dir = Path(save_dir)
         self.save_dir.mkdir(parents=True, exist_ok=True)
-        self.model, self.predictor, self.prompts = build_dhga_voxtell_model(config, prompts)
-        if config.init_checkpoint or config.resume_checkpoint:
+        if model is None or predictor is None:
+            self.model, self.predictor, self.prompts = build_dhga_voxtell_model(config, prompts)
+        else:
+            self.model, self.predictor, self.prompts = model, predictor, prompts
+        if model is None and (config.init_checkpoint or config.resume_checkpoint):
             from dhga.checkpoint import load_training_checkpoint
 
             load_training_checkpoint(config.resume_checkpoint or config.init_checkpoint, self.model, load_training_state=False)
@@ -105,8 +117,6 @@ class DHGAEvaluator:
             app_prob = app_sum / count.clamp_min(1)
             visual_feature = visual_sum / count.clamp_min(1)
             router = self.model.router(sem_prob, app_prob, visual_context=visual_feature.mean(dim=1, keepdim=True))
-            self.last_semantic_pred = (sem_prob >= self.config.pred_threshold).cpu().numpy()[0, 0]
-            self.last_appearance_pred = (app_prob >= self.config.pred_threshold).cpu().numpy()[0, 0]
             sem_mask = sem_prob >= self.config.pred_threshold
             app_mask = app_prob >= self.config.pred_threshold
             sem_only = sem_mask & ~app_mask
@@ -120,28 +130,24 @@ class DHGAEvaluator:
                 "disagreement_voxel_rate": float((router.disagreement > 0.5).float().mean().cpu()),
                 "geometry_gate_mean": float(router.w_geo.mean().cpu()),
             }
-            geometry = self.model.run_geometry(
-                data_t,
-                sem_prob,
-                app_prob,
-                router,
-                self.model.text_embeddings,
-                spacing,
-                visual_feature=visual_feature,
-                visual_feature_is_projected=True,
-            )
-            phi = mask_to_sdf(router.fused_prob >= self.config.pred_threshold, spacing)
-            final = finalize_probability(
-                router.fused_prob,
-                phi,
-                geometry["dense_displacement_mm"],
-                router.w_geo,
-                self.config,
-                geometry.get("dense_valid_weight"),
-            )
+            if self.config.dhga_geometry_enabled:
+                geometry = self.model.run_geometry(data_t,sem_prob,app_prob,router, self.model.text_embeddings, spacing, visual_feature=visual_feature,visual_feature_is_projected=True,)
+                phi = mask_to_sdf(router.fused_prob >= self.config.pred_threshold, spacing)
+                final = finalize_probability(router.fused_prob,phi,geometry["dense_displacement_mm"],router.w_geo,self.config,geometry.get("dense_valid_weight"),)
+            else:
+                geometry = None
+                final=router.fused_prob
         final = final[(slice(None), slice(None), *slicer_revert_padding[1:])].cpu().numpy()[0]
+        sem_crop = sem_prob[(slice(None), slice(None), *slicer_revert_padding[1:])].cpu().numpy()[0]
+        app_crop = app_prob[(slice(None), slice(None), *slicer_revert_padding[1:])].cpu().numpy()[0]
         reverted = np.zeros((final.shape[0], *orig_shape), dtype=np.float32)
         reverted = self.insert_crop_into_image(reverted, final, bbox)
+        sem_reverted = np.zeros((sem_crop.shape[0], *orig_shape), dtype=np.float32)
+        app_reverted = np.zeros((app_crop.shape[0], *orig_shape), dtype=np.float32)
+        sem_reverted = self.insert_crop_into_image(sem_reverted, sem_crop, bbox)
+        app_reverted = self.insert_crop_into_image(app_reverted, app_crop, bbox)
+        self.last_semantic_pred = sem_reverted[0] >= self.config.pred_threshold
+        self.last_appearance_pred = app_reverted[0] >= self.config.pred_threshold
         return reverted, props
 
 

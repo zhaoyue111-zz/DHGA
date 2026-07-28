@@ -116,6 +116,7 @@ class DHGAStageTrainer:
         self.teacher = EMATeacher(self.model, config.dhga_ema_decay) if config.dhga_use_ema_teacher else None
         self.start_epoch = 0
         self.global_step = 0
+        self.stage_b_anchor_cache: dict[str, list[tuple[tuple, str]]] = {}
         self._load_initial_or_resume()
         self._init_io()
         self.writer = self._init_tensorboard()
@@ -256,7 +257,7 @@ class DHGAStageTrainer:
                         slicers = self.predictor._internal_get_sliding_window_slicers(volume.shape[1:])
                         random.shuffle(slicers)
                         if self.config.dhga_stage == "B":
-                            selected_slicers = self._stage_b_anchor_guided_slicers(volume, spacing, slicers)
+                            selected_slicers = self._stage_b_anchor_guided_slicers(path, volume, spacing, slicers)
                         else:
                             if self.config.dhga_stage in {"C", "D"}:
                                 slicers = self._teacher_boundary_guided_slicers(volume, spacing, slicers)
@@ -361,11 +362,18 @@ class DHGAStageTrainer:
         return ((x - lo) / (hi - lo).clamp_min(1e-6)).clamp(0, 1)
 
     def _stage_b_patches_per_case(self) -> int:
-        return 3 if self.config.dhga_stage_b_include_background_patch else 2
+        requested = self.config.steps_per_volume if self.config.steps_per_volume > 0 else 3
+        requested = max(2, min(3, int(requested)))
+        if not self.config.dhga_stage_b_include_background_patch:
+            requested = min(requested, 2)
+        return requested
 
-    def _stage_b_anchor_guided_slicers(self, volume, spacing: tuple[float, float, float], slicers: list) -> list[tuple[tuple, str]]:
+    def _stage_b_anchor_guided_slicers(self, path: Path | str, volume, spacing: tuple[float, float, float], slicers: list) -> list[tuple[tuple, str]]:
         if not slicers:
             return []
+        cache_key = str(path)
+        if cache_key in self.stage_b_anchor_cache:
+            return self.stage_b_anchor_cache[cache_key]
         candidate_count = min(len(slicers), max(self.config.dhga_stage_b_anchor_candidate_patches, self._stage_b_patches_per_case()))
         candidates = slicers[:candidate_count]
         scored = []
@@ -376,9 +384,10 @@ class DHGAStageTrainer:
                 patch = torch.as_tensor(volume[slicer][None], device=self.device, dtype=torch.float32)
                 out = self.model.baseline_forward(patch, spacing) if hasattr(self.model, "baseline_forward") else self.model(patch, spacing, run_geometry=False)
                 anchor = out.anchor_prob.detach().float()
+                body_ratio = float((patch[:, :1].detach().float().abs() > 1e-3).float().mean().cpu())
                 fg_score = float(anchor.mean().cpu())
                 boundary_score = float((1.0 - (anchor - 0.5).abs() * 2.0).clamp(0, 1).mean().cpu())
-                scored.append({"slicer": slicer, "fg": fg_score, "boundary": boundary_score, "bg": 1.0 - fg_score})
+                scored.append({"slicer": slicer, "fg": fg_score, "boundary": boundary_score, "bg": (1.0 - fg_score) * body_ratio, "body": body_ratio})
         self.model.train(was_training)
         selected: list[tuple[tuple, str]] = []
         used: set[int] = set()
@@ -392,7 +401,7 @@ class DHGAStageTrainer:
 
         add_best("fg", "foreground")
         add_best("boundary", "boundary")
-        if self.config.dhga_stage_b_include_background_patch:
+        if self._stage_b_patches_per_case() >= 3 and self.config.dhga_stage_b_include_background_patch:
             add_best("bg", "background")
         if len(selected) < self._stage_b_patches_per_case():
             for idx, item in enumerate(scored):
@@ -401,6 +410,7 @@ class DHGAStageTrainer:
                     used.add(idx)
                 if len(selected) >= self._stage_b_patches_per_case():
                     break
+        self.stage_b_anchor_cache[cache_key] = selected
         return selected
 
     def _log_epoch_metrics(self, epoch: int, records: list[dict]) -> dict[str, float]:
@@ -409,7 +419,19 @@ class DHGAStageTrainer:
             for key, value in record.items():
                 if isinstance(value, (int, float)):
                     numeric.setdefault(key, []).append(float(value))
-        metrics = {f"epoch_{key}": sum(values) / max(len(values), 1) for key, values in numeric.items()}
+        metrics: dict[str, float] = {}
+        for key, values in numeric.items():
+            values = sorted(values)
+            count = len(values)
+            if count == 0:
+                continue
+            p90_idx = min(count - 1, int(0.9 * (count - 1)))
+            mid = count // 2
+            median = values[mid] if count % 2 else 0.5 * (values[mid - 1] + values[mid])
+            metrics[f"epoch_{key}_mean"] = sum(values) / count
+            metrics[f"epoch_{key}_median"] = median
+            metrics[f"epoch_{key}_p90"] = values[p90_idx]
+            metrics[f"epoch_{key}_max"] = values[-1]
         if self.writer is not None:
             for key, value in metrics.items():
                 self.writer.add_scalar(f"epoch/{key}", value, epoch)
@@ -423,16 +445,27 @@ class DHGAStageTrainer:
         from .config import DHGAConfig
         from .evaluation import DHGAEvaluator
 
-        checkpoint_path = self.save_dir / "checkpoint_last.pt"
         values = self.config.to_dict()
-        values["init_checkpoint"] = str(checkpoint_path)
+        values["init_checkpoint"] = ""
         values["resume_checkpoint"] = ""
         if self.config.dhga_stage == "B":
             values["dhga_geometry_enabled"] = False
         eval_config = DHGAConfig.from_mapping(values)
         eval_dir = self.save_dir / f"eval_epoch_{epoch:04d}"
-        evaluator = DHGAEvaluator(eval_config, self.prompts, eval_dir, self.config.val_label_dir, self.config.label_values)
-        metrics = evaluator.evaluate_split("test", 0)
+        was_training = self.model.training
+        evaluator = DHGAEvaluator(
+            eval_config,
+            self.prompts,
+            eval_dir,
+            self.config.val_label_dir,
+            self.config.label_values,
+            model=self.model,
+            predictor=self.predictor,
+        )
+        try:
+            metrics = evaluator.evaluate_split("test", 0)
+        finally:
+            self.model.train(was_training)
         if self.writer is not None:
             for key in ("mean_dice", "mean_iou", "mean_precision", "mean_recall"):
                 value = metrics.get(key)
