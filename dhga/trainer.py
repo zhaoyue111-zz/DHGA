@@ -726,15 +726,25 @@ class DHGAStageTrainer:
             teacher_out = self._teacher_forward(weak.float(), spacing, run_geometry=False)
         strong_out = self.model(strong, spacing, run_geometry=False)
         stable_anchor = ((teacher_out.anchor_prob.detach() > 0.9) | (teacher_out.anchor_prob.detach() < 0.1)).float()
-        anchor_loss = weighted_bce_prob(strong_out.semantic_prob, teacher_out.anchor_prob.detach(), stable_anchor) # 只直接训练Semantic expert
+        semantic_anchor = weighted_bce_prob(strong_out.semantic_prob, teacher_out.anchor_prob.detach(), stable_anchor)
+        appearance_anchor = weighted_bce_prob(strong_out.appearance_prob, teacher_out.anchor_prob.detach(), stable_anchor)
+        anchor_loss = semantic_anchor + self.config.dhga_appearance_anchor_weight * appearance_anchor
+        stable_background = (teacher_out.router.stable_background.detach() * (teacher_out.anchor_prob.detach() < 0.1).float()).clamp(0, 1)
+        appearance_stable_bg = weighted_bce_prob(strong_out.appearance_prob, torch.zeros_like(strong_out.appearance_prob), stable_background)
+        appearance_volume_excess = (
+            strong_out.appearance_prob.float().flatten(1).mean(dim=1)
+            - teacher_out.anchor_prob.detach().float().flatten(1).mean(dim=1)
+        ).clamp_min(0.0).mean()
+        appearance_expansion = appearance_volume_excess + 0.5 * appearance_stable_bg
         weak_strong = F.mse_loss(strong_out.semantic_prob, teacher_out.semantic_prob.detach()) + F.mse_loss(strong_out.appearance_prob, teacher_out.appearance_prob.detach()) # 同专家一致性
-        cross_weight = teacher_out.router.cross_supervision_weight.detach()
+        cross_weight = teacher_out.router.cross_supervision_weight.detach().clamp_min(self.config.dhga_cross_supervision_min_weight)
         sem_from_teacher_app = weighted_bce_prob(strong_out.semantic_prob, teacher_out.appearance_prob.detach(), cross_weight) # Semantic学习teacher Appearance
         app_from_teacher_sem = weighted_bce_prob(strong_out.appearance_prob, teacher_out.semantic_prob.detach(), cross_weight) # Appearance学习Teacher Semantic
         cross = 0.5 * (sem_from_teacher_app + app_from_teacher_sem)
         router_loss = self._router_target_loss(strong_out, teacher_out, min_weight=0.05)
         loss = (
             self.config.dhga_anchor_weight * anchor_loss
+            + self.config.dhga_appearance_expansion_weight * appearance_expansion
             + self.config.dhga_weak_strong_weight * weak_strong
             + self.config.dhga_cross_supervision_weight * cross
             + 0.1 * router_loss
@@ -769,11 +779,18 @@ class DHGAStageTrainer:
             "dhga_teacher_w_geo_disagreement_mean": float((teacher_w_geo * teacher_disagreement).sum().cpu() / teacher_disagreement.sum().clamp_min(1e-6).cpu()),
             "dhga_teacher_w_geo_high_disagreement_mean": float(teacher_w_geo[teacher_high_disagreement].mean().cpu()) if bool(teacher_high_disagreement.any().cpu()) else 0.0,
             "dhga_teacher_cross_supervision_weight": float(teacher_out.router.cross_supervision_weight.detach().mean().cpu()),
+            "dhga_cross_supervision_effective_weight": float(cross_weight.detach().mean().cpu()),
+            "dhga_cross_supervision_min_effective_weight": float(cross_weight.detach().min().cpu()),
             "dhga_router_supervision_weight": float(self._router_supervision_weight(teacher_out, 0.05).detach().mean().cpu()),
         }
         metrics.update({
             "loss": float(loss.detach().cpu()),
             "dhga_anchor_loss": float(anchor_loss.detach().cpu()),
+            "dhga_semantic_anchor_loss": float(semantic_anchor.detach().cpu()),
+            "dhga_appearance_anchor_loss": float(appearance_anchor.detach().cpu()),
+            "dhga_appearance_expansion_loss": float(appearance_expansion.detach().cpu()),
+            "dhga_appearance_volume_excess_loss": float(appearance_volume_excess.detach().cpu()),
+            "dhga_appearance_stable_background_loss": float(appearance_stable_bg.detach().cpu()),
             "dhga_weak_strong_loss": float(weak_strong.detach().cpu()),
             "dhga_cross_supervision_loss": float(cross.detach().cpu()),
             "dhga_router_target_loss": float(router_loss.detach().cpu()),

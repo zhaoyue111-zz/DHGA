@@ -23,7 +23,7 @@ from dhga.shared_voxtell import SharedEncoderOnce
 from dhga.trainer import DHGASmokeModel, run_synthetic_smoke
 from dhga.trainer import DHGAStageTrainer
 from dhga.teacher import EMATeacher
-from dhga.evaluation import compute_binary_case_metrics, connected_components_3d, spacing_from_reader_properties, write_float_volume_like_reader
+from dhga.evaluation import compute_binary_case_metrics, compute_raw_disagreement_metrics, connected_components_3d, spacing_from_reader_properties, write_float_volume_like_reader
 from dhga.voxtell_model import DHGAVoxTellModel, PromptConditionedRayTokens
 
 
@@ -664,6 +664,41 @@ class DHGAStaticTests(unittest.TestCase):
         app = torch.tensor([[[0.4, 0.2]]])
         raw = (sem.float() - app.float()).abs()
         self.assertTrue(torch.allclose(raw, torch.tensor([[[0.3, 0.7]]])))
+
+    def test_raw_disagreement_metrics_cover_union_and_gt_boundary(self):
+        import numpy as np
+
+        raw = np.zeros((5, 5, 5), dtype=np.float32)
+        raw[1:4, 1:4, 1:4] = 0.2
+        raw[2, 2, 2] = 0.8
+        sem = np.zeros_like(raw, dtype=bool)
+        app = np.zeros_like(raw, dtype=bool)
+        gt = np.zeros_like(raw, dtype=bool)
+        sem[1:3, 1:3, 1:3] = True
+        app[2:4, 2:4, 2:4] = True
+        gt[1:4, 1:4, 1:4] = True
+        metrics = compute_raw_disagreement_metrics(raw, sem, app, gt, spacing=(1.0, 1.0, 2.0), boundary_band_mm=1.5)
+        for key in (
+            "raw_disagreement_mean",
+            "raw_disagreement_p50",
+            "raw_disagreement_p75",
+            "raw_disagreement_p90",
+            "raw_disagreement_p95",
+            "raw_disagreement_gt_0.1_rate",
+            "raw_disagreement_gt_0.2_rate",
+            "raw_disagreement_gt_0.3_rate",
+            "raw_disagreement_union_mean",
+            "raw_disagreement_union_p90",
+            "raw_disagreement_union_voxel_rate",
+            "raw_disagreement_gt_boundary_mean",
+            "raw_disagreement_gt_boundary_p95",
+            "raw_disagreement_gt_boundary_voxel_rate",
+        ):
+            self.assertIn(key, metrics)
+        self.assertGreater(metrics["raw_disagreement_mean"], 0.0)
+        self.assertGreater(metrics["raw_disagreement_union_mean"], metrics["raw_disagreement_mean"])
+        self.assertGreater(metrics["raw_disagreement_gt_boundary_voxel_rate"], 0.0)
+        self.assertLessEqual(metrics["raw_disagreement_gt_boundary_voxel_rate"], 1.0)
 
     def test_float_volume_writer_rejects_non_3d(self):
         import numpy as np

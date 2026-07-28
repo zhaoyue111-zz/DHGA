@@ -74,7 +74,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dhga_use_ema_teacher", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--dhga_ema_decay", type=float, default=0.99)
     parser.add_argument("--dhga_anchor_weight", type=float, default=0.25)
+    parser.add_argument("--dhga_appearance_anchor_weight", type=float, default=0.25)
+    parser.add_argument("--dhga_appearance_expansion_weight", type=float, default=0.1)
     parser.add_argument("--dhga_cross_supervision_weight", type=float, default=1.0)
+    parser.add_argument("--dhga_cross_supervision_min_weight", type=float, default=0.05)
     parser.add_argument("--dhga_weak_strong_weight", type=float, default=0.5)
     parser.add_argument("--dhga_router_normalization", choices=("case_rank", "none"), default="case_rank")
     parser.add_argument("--dhga_geometry_enabled", action=argparse.BooleanOptionalAction, default=True)
@@ -163,7 +166,10 @@ def config_from_args(args: argparse.Namespace) -> DHGAConfig:
         dhga_use_ema_teacher=args.dhga_use_ema_teacher,
         dhga_ema_decay=args.dhga_ema_decay,
         dhga_anchor_weight=args.dhga_anchor_weight,
+        dhga_appearance_anchor_weight=args.dhga_appearance_anchor_weight,
+        dhga_appearance_expansion_weight=args.dhga_appearance_expansion_weight,
         dhga_cross_supervision_weight=args.dhga_cross_supervision_weight,
+        dhga_cross_supervision_min_weight=args.dhga_cross_supervision_min_weight,
         dhga_weak_strong_weight=args.dhga_weak_strong_weight,
         dhga_router_normalization=args.dhga_router_normalization,
         dhga_geometry_enabled=args.dhga_geometry_enabled,

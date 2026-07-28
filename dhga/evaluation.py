@@ -73,6 +73,17 @@ class DHGAEvaluator:
                 sem_pred = getattr(self, "last_semantic_pred", pred)
                 app_pred = getattr(self, "last_appearance_pred", pred)
                 row.update(compute_binary_case_metrics(pred, gt, sem_pred, app_pred))
+                raw_disagreement = getattr(self, "last_raw_disagreement", None)
+                if raw_disagreement is not None:
+                    row.update(
+                        compute_raw_disagreement_metrics(
+                            raw_disagreement,
+                            semantic_pred=sem_pred,
+                            appearance_pred=app_pred,
+                            gt=gt,
+                            spacing=spacing_from_reader_properties(image_props),
+                        )
+                    )
             rows.append(row)
             out_name = path.name.replace(".nii.gz", "").replace(".nii", "") + "_dhga.nii.gz"
             self.reader.write_seg(pred.astype(np.uint8), str(self.save_dir / out_name), image_props)
@@ -252,6 +263,92 @@ def compute_binary_case_metrics(
             "oracle_intersection_iou": intersection_iou,
         })
     return metrics
+
+
+def compute_raw_disagreement_metrics(
+    raw_disagreement: np.ndarray,
+    semantic_pred: np.ndarray | None = None,
+    appearance_pred: np.ndarray | None = None,
+    gt: np.ndarray | None = None,
+    spacing: tuple[float, float, float] = (1.0, 1.0, 1.0),
+    boundary_band_mm: float = 2.0,
+) -> dict[str, float]:
+    raw = np.asarray(raw_disagreement, dtype=np.float32)
+    metrics: dict[str, float] = {}
+    metrics.update(_raw_disagreement_summary(raw, "raw_disagreement"))
+    for threshold in (0.1, 0.2, 0.3):
+        metrics[f"raw_disagreement_gt_{threshold:.1f}_rate"] = float((raw > threshold).mean()) if raw.size else 0.0
+
+    if semantic_pred is not None and appearance_pred is not None:
+        union = np.logical_or(np.asarray(semantic_pred, dtype=bool), np.asarray(appearance_pred, dtype=bool))
+        metrics.update(_raw_disagreement_summary(raw[union], "raw_disagreement_union"))
+        metrics["raw_disagreement_union_voxel_rate"] = float(union.mean()) if union.size else 0.0
+        for threshold in (0.1, 0.2, 0.3):
+            metrics[f"raw_disagreement_union_gt_{threshold:.1f}_rate"] = float((raw[union] > threshold).mean()) if union.any() else 0.0
+
+    if gt is not None:
+        boundary = gt_boundary_band(np.asarray(gt, dtype=bool), spacing, boundary_band_mm)
+        metrics.update(_raw_disagreement_summary(raw[boundary], "raw_disagreement_gt_boundary"))
+        for threshold in (0.1, 0.2, 0.3):
+            metrics[f"raw_disagreement_gt_boundary_gt_{threshold:.1f}_rate"] = float((raw[boundary] > threshold).mean()) if boundary.any() else 0.0
+        metrics["raw_disagreement_gt_boundary_voxel_rate"] = float(boundary.mean()) if boundary.size else 0.0
+    return metrics
+
+
+def _raw_disagreement_summary(values: np.ndarray, prefix: str) -> dict[str, float]:
+    values = np.asarray(values, dtype=np.float32)
+    if values.size == 0:
+        return {
+            f"{prefix}_mean": 0.0,
+            f"{prefix}_p50": 0.0,
+            f"{prefix}_p75": 0.0,
+            f"{prefix}_p90": 0.0,
+            f"{prefix}_p95": 0.0,
+        }
+    return {
+        f"{prefix}_mean": float(values.mean()),
+        f"{prefix}_p50": float(np.percentile(values, 50)),
+        f"{prefix}_p75": float(np.percentile(values, 75)),
+        f"{prefix}_p90": float(np.percentile(values, 90)),
+        f"{prefix}_p95": float(np.percentile(values, 95)),
+    }
+
+
+def gt_boundary_band(mask: np.ndarray, spacing: tuple[float, float, float], band_mm: float = 2.0) -> np.ndarray:
+    mask = np.asarray(mask, dtype=bool)
+    if not mask.any() or bool(mask.all()):
+        return np.zeros_like(mask, dtype=bool)
+    try:
+        from scipy import ndimage
+
+        outside = ndimage.distance_transform_edt(~mask, sampling=spacing)
+        inside = ndimage.distance_transform_edt(mask, sampling=spacing)
+        return np.minimum(outside, inside) <= float(band_mm)
+    except Exception:
+        min_spacing = max(float(min(spacing)), 1e-6)
+        iterations = max(1, int(np.ceil(float(band_mm) / min_spacing)))
+        dilated = mask.copy()
+        eroded = mask.copy()
+        for _ in range(iterations):
+            dilated = _binary_dilate6(dilated)
+            eroded = _binary_erode6(eroded)
+        return np.logical_and(dilated, ~eroded)
+
+
+def _binary_dilate6(mask: np.ndarray) -> np.ndarray:
+    mask = np.asarray(mask, dtype=bool)
+    out = mask.copy()
+    out[1:, :, :] |= mask[:-1, :, :]
+    out[:-1, :, :] |= mask[1:, :, :]
+    out[:, 1:, :] |= mask[:, :-1, :]
+    out[:, :-1, :] |= mask[:, 1:, :]
+    out[:, :, 1:] |= mask[:, :, :-1]
+    out[:, :, :-1] |= mask[:, :, 1:]
+    return out
+
+
+def _binary_erode6(mask: np.ndarray) -> np.ndarray:
+    return ~_binary_dilate6(~np.asarray(mask, dtype=bool))
 
 
 def _binary_metric_values(pred: np.ndarray, gt: np.ndarray) -> dict[str, float | int]:

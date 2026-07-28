@@ -44,7 +44,10 @@ class DHGAConfig:
     dhga_use_ema_teacher: bool = True
     dhga_ema_decay: float = 0.99
     dhga_anchor_weight: float = 0.25
+    dhga_appearance_anchor_weight: float = 0.25
+    dhga_appearance_expansion_weight: float = 0.1
     dhga_cross_supervision_weight: float = 1.0
+    dhga_cross_supervision_min_weight: float = 0.05
     dhga_weak_strong_weight: float = 0.5
     dhga_router_normalization: str = "case_rank"
     dhga_geometry_enabled: bool = True
@@ -92,6 +95,14 @@ class DHGAConfig:
             raise ValueError("dhga_appearance_feature_dropout must be in [0, 1)")
         if not 0.0 < self.dhga_ema_decay < 1.0:
             raise ValueError("dhga_ema_decay must be in (0, 1)")
+        if self.dhga_anchor_weight < 0 or self.dhga_appearance_anchor_weight < 0:
+            raise ValueError("anchor weights must be non-negative")
+        if self.dhga_appearance_expansion_weight < 0:
+            raise ValueError("dhga_appearance_expansion_weight must be non-negative")
+        if self.dhga_cross_supervision_weight < 0:
+            raise ValueError("dhga_cross_supervision_weight must be non-negative")
+        if not 0.0 <= self.dhga_cross_supervision_min_weight <= 1.0:
+            raise ValueError("dhga_cross_supervision_min_weight must be in [0, 1]")
         if self.dhga_router_normalization not in {"case_rank", "none"}:
             raise ValueError("dhga_router_normalization must be case_rank or none")
         if self.dhga_search_radius_mm <= 0 or self.dhga_ray_step_mm <= 0:
