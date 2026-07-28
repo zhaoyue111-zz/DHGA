@@ -3,5 +3,7 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 save/
-*.log
+*.nii.gz
+*.nii
+*.npy
 *.pt
