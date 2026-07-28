@@ -412,6 +412,43 @@ class DHGAStaticTests(unittest.TestCase):
         self.assertEqual(trainer._stage_b_patch_kind_counts(4), {"foreground": 2, "boundary": 1, "background": 1})
         self.assertEqual(trainer._stage_b_patch_kind_counts(2), {"foreground": 1, "boundary": 1, "background": 0})
 
+    def test_best_checkpoint_replaces_epoch_checkpoint_saves(self):
+        class FakeWriter:
+            def add_scalar(self, *args, **kwargs):
+                pass
+
+        class FakeEvaluator:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def evaluate_split(self, split, max_cases):
+                return {"mean_dice": 0.7, "rows": []}
+
+        trainer = DHGAStageTrainer.__new__(DHGAStageTrainer)
+        trainer.config = DHGAConfig(dhga_stage="B", val_label_dir="/tmp")
+        trainer.save_dir = Path(tempfile.mkdtemp())
+        trainer.model = DHGASmokeModel(trainer.config)
+        trainer.optimizer = None
+        trainer.teacher = None
+        trainer.scaler = None
+        trainer.global_step = 3
+        trainer.best_validation_score = None
+        trainer.writer = FakeWriter()
+        trainer.prompts = ["liver"]
+        trainer.predictor = SimpleNamespace()
+
+        import dhga.evaluation as evaluation_module
+
+        original = evaluation_module.DHGAEvaluator
+        evaluation_module.DHGAEvaluator = FakeEvaluator
+        try:
+            trainer._run_periodic_test_evaluation(2, {"epoch_loss_mean": 1.0})
+        finally:
+            evaluation_module.DHGAEvaluator = original
+        self.assertTrue((trainer.save_dir / "checkpoint_best.pt").exists())
+        self.assertFalse((trainer.save_dir / "checkpoint_epoch_0002.pt").exists())
+        self.assertFalse((trainer.save_dir / "checkpoint_last.pt").exists())
+
     def test_epoch_metrics_include_distribution_summary(self):
         trainer = DHGAStageTrainer.__new__(DHGAStageTrainer)
         trainer.writer = None

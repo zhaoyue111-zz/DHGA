@@ -117,6 +117,7 @@ class DHGAStageTrainer:
         self.teacher = EMATeacher(self.model, config.dhga_ema_decay) if config.dhga_use_ema_teacher else None
         self.start_epoch = 0
         self.global_step = 0
+        self.best_validation_score: float | None = None
         self.stage_b_anchor_cache: dict[str, list[dict]] = {}
         self._load_initial_or_resume()
         self._init_io()
@@ -288,6 +289,9 @@ class DHGAStageTrainer:
             )
             self.start_epoch = int(payload.get("epoch", 0))
             self.global_step = int(payload.get("global_step", 0))
+            metadata = payload.get("metadata", {})
+            if isinstance(metadata.get("best_score"), (int, float)):
+                self.best_validation_score = float(metadata["best_score"])
             return
         if self.config.init_checkpoint:
             load_training_checkpoint(
@@ -408,19 +412,8 @@ class DHGAStageTrainer:
                             patch_bar.set_postfix({"loss": f"{float(metrics.get('loss', 0.0)):.4f}", "kind": patch_kind, "case": Path(path).name[:18]})
                             patch_bar.update(1)
                 epoch_metrics = self._log_epoch_metrics(epoch + 1, epoch_records)
-                save_training_checkpoint(
-                    self.save_dir / "checkpoint_last.pt",
-                    self.model,
-                    self.config,
-                    optimizer=self.optimizer,
-                    ema=self.teacher if self.teacher is not None else None,
-                    scaler=self.scaler,
-                    epoch=epoch + 1,
-                    global_step=self.global_step,
-                    metadata={"stage": self.config.dhga_stage, "epoch_metrics": epoch_metrics},
-                )
                 if self.config.dhga_stage == "B" and (epoch + 1) % self.config.dhga_validation_interval_epochs == 0:
-                    self._run_periodic_test_evaluation(epoch + 1)
+                    self._run_periodic_test_evaluation(epoch + 1, epoch_metrics)
         finally:
             if self.writer is not None:
                 self.writer.flush()
@@ -617,7 +610,7 @@ class DHGAStageTrainer:
                 self.writer.add_scalar(f"epoch/{key}", value, epoch)
         return metrics
 
-    def _run_periodic_test_evaluation(self, epoch: int) -> None:
+    def _run_periodic_test_evaluation(self, epoch: int, epoch_metrics: dict[str, float] | None = None) -> None:
         label_dir = Path(self.config.val_label_dir)
         if not self.config.val_label_dir or not label_dir.exists():
             print(f"Skip test evaluation at epoch {epoch}: val_label_dir not found: {self.config.val_label_dir}")
@@ -650,17 +643,26 @@ class DHGAStageTrainer:
             for key, value in metrics.items():
                 if key != "rows" and isinstance(value, (int, float)) and value is not None:
                     self.writer.add_scalar(f"test/{key}", float(value), epoch)
-        save_training_checkpoint(
-            self.save_dir / f"checkpoint_epoch_{epoch:04d}.pt",
-            self.model,
-            self.config,
-            optimizer=self.optimizer,
-            ema=self.teacher if self.teacher is not None else None,
-            scaler=self.scaler,
-            epoch=epoch,
-            global_step=self.global_step,
-            metadata={"stage": self.config.dhga_stage, "test_metrics": {k: v for k, v in metrics.items() if k != "rows"}},
-        )
+        score = metrics.get("mean_dice")
+        if isinstance(score, (int, float)) and (self.best_validation_score is None or float(score) > self.best_validation_score):
+            self.best_validation_score = float(score)
+            save_training_checkpoint(
+                self.save_dir / "checkpoint_best.pt",
+                self.model,
+                self.config,
+                optimizer=self.optimizer,
+                ema=self.teacher if self.teacher is not None else None,
+                scaler=self.scaler,
+                epoch=epoch,
+                global_step=self.global_step,
+                metadata={
+                    "stage": self.config.dhga_stage,
+                    "best_metric": "mean_dice",
+                    "best_score": self.best_validation_score,
+                    "epoch_metrics": epoch_metrics or {},
+                    "test_metrics": {k: v for k, v in metrics.items() if k != "rows"},
+                },
+            )
 
     def training_step(self, patch: Tensor, spacing: tuple[float, float, float]) -> tuple[Tensor, dict[str, float]]:
         stage = self.config.dhga_stage
@@ -720,15 +722,15 @@ class DHGAStageTrainer:
 
     def _stage_b(self, patch: Tensor, spacing: tuple[float, float, float]) -> tuple[Tensor, dict[str, float]]:
         weak, strong, _ = weak_strong_intensity_views(patch)
-        with torch.autocast(self.device.type, enabled=False):
+        with torch.autocast(self.device.type, enabled=False): # 不使用混合精度
             teacher_out = self._teacher_forward(weak.float(), spacing, run_geometry=False)
         strong_out = self.model(strong, spacing, run_geometry=False)
         stable_anchor = ((teacher_out.anchor_prob.detach() > 0.9) | (teacher_out.anchor_prob.detach() < 0.1)).float()
-        anchor_loss = weighted_bce_prob(strong_out.semantic_prob, teacher_out.anchor_prob.detach(), stable_anchor)
-        weak_strong = F.mse_loss(strong_out.semantic_prob, teacher_out.semantic_prob.detach()) + F.mse_loss(strong_out.appearance_prob, teacher_out.appearance_prob.detach())
+        anchor_loss = weighted_bce_prob(strong_out.semantic_prob, teacher_out.anchor_prob.detach(), stable_anchor) # 只直接训练Semantic expert
+        weak_strong = F.mse_loss(strong_out.semantic_prob, teacher_out.semantic_prob.detach()) + F.mse_loss(strong_out.appearance_prob, teacher_out.appearance_prob.detach()) # 同专家一致性
         cross_weight = teacher_out.router.cross_supervision_weight.detach()
-        sem_from_teacher_app = weighted_bce_prob(strong_out.semantic_prob, teacher_out.appearance_prob.detach(), cross_weight)
-        app_from_teacher_sem = weighted_bce_prob(strong_out.appearance_prob, teacher_out.semantic_prob.detach(), cross_weight)
+        sem_from_teacher_app = weighted_bce_prob(strong_out.semantic_prob, teacher_out.appearance_prob.detach(), cross_weight) # Semantic学习teacher Appearance
+        app_from_teacher_sem = weighted_bce_prob(strong_out.appearance_prob, teacher_out.semantic_prob.detach(), cross_weight) # Appearance学习Teacher Semantic
         cross = 0.5 * (sem_from_teacher_app + app_from_teacher_sem)
         router_loss = self._router_target_loss(strong_out, teacher_out, min_weight=0.05)
         loss = (

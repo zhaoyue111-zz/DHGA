@@ -185,7 +185,7 @@ Use `--resume_checkpoint` for the same stage. This restores model, optimizer, EM
 CUDA_VISIBLE_DEVICES=0 conda run -n voxtell python run_3d_dhga.py \
   --train \
   --dhga_stage C \
-  --resume_checkpoint .save/dhga/stage_c/checkpoint_last.pt \
+  --resume_checkpoint .save/dhga/stage_c/checkpoint_final.pt \
   --save_dir .save/dhga/stage_c \
   --voxtell_repo /data/zy/VoxTell_from_disk \
   --model_dir /data/zy/VoxTell_from_disk/model \
