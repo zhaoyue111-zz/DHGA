@@ -55,8 +55,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tensorboard_enabled", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--tensorboard_log_interval", type=int, default=1)
     parser.add_argument("--tensorboard_image_interval", type=int, default=50)
-    parser.add_argument("--val_label_dir", default="")
-    parser.add_argument("--label_values", nargs="*", type=int, default=None)
+    parser.add_argument("--dhga_stage_b_anchor_candidate_patches", type=int, default=24)
+    parser.add_argument("--dhga_stage_b_include_background_patch", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--dhga_validation_interval_epochs", type=int, default=2)
+    parser.add_argument("--val_label_dir", default="/data/zy/CT_MRI_DATA_3D/labels/P0")
+    parser.add_argument("--label_values", nargs="*", type=int, default=[5])
     parser.add_argument("--init_checkpoint", default="")
     parser.add_argument("--resume_checkpoint", default="")
     parser.add_argument("--no_amp", action="store_true")
@@ -139,9 +142,14 @@ def config_from_args(args: argparse.Namespace) -> DHGAConfig:
         amp=not args.no_amp,
         seed=args.seed,
         max_cases=args.max_cases,
+        val_label_dir=args.val_label_dir,
+        label_values=list(args.label_values or [5]),
         tensorboard_enabled=args.tensorboard_enabled,
         tensorboard_log_interval=args.tensorboard_log_interval,
         tensorboard_image_interval=args.tensorboard_image_interval,
+        dhga_stage_b_anchor_candidate_patches=args.dhga_stage_b_anchor_candidate_patches,
+        dhga_stage_b_include_background_patch=args.dhga_stage_b_include_background_patch,
+        dhga_validation_interval_epochs=args.dhga_validation_interval_epochs,
         init_checkpoint=args.init_checkpoint,
         resume_checkpoint=args.resume_checkpoint,
         dhga_enabled=args.dhga_enabled,

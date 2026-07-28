@@ -244,18 +244,26 @@ class DHGAStageTrainer:
         try:
             for epoch in tqdm(range(self.start_epoch, self.config.epochs), desc=f"DHGA Stage {self.config.dhga_stage}", dynamic_ncols=True):
                 random.shuffle(train_paths)
-                epoch_total = len(train_paths) * self.config.steps_per_volume if self.config.steps_per_volume > 0 else None
+                if self.config.dhga_stage == "B":
+                    epoch_total = len(train_paths) * self._stage_b_patches_per_case()
+                else:
+                    epoch_total = len(train_paths) * self.config.steps_per_volume if self.config.steps_per_volume > 0 else None
+                epoch_records = []
                 with tqdm(total=epoch_total, desc=f"epoch {epoch + 1}/{self.config.epochs}", dynamic_ncols=True, leave=False) as patch_bar:
                     for path in train_paths:
                         volume, spacing = self._load_volume(path)
                         patch_size = tuple(int(v) for v in self.predictor.patch_size)
                         slicers = self.predictor._internal_get_sliding_window_slicers(volume.shape[1:])
                         random.shuffle(slicers)
-                        if self.config.dhga_stage in {"C", "D"}:
-                            slicers = self._teacher_boundary_guided_slicers(volume, spacing, slicers)
-                        if self.config.steps_per_volume > 0:
-                            slicers = slicers[: self.config.steps_per_volume]
-                        for slicer in slicers:
+                        if self.config.dhga_stage == "B":
+                            selected_slicers = self._stage_b_anchor_guided_slicers(volume, spacing, slicers)
+                        else:
+                            if self.config.dhga_stage in {"C", "D"}:
+                                slicers = self._teacher_boundary_guided_slicers(volume, spacing, slicers)
+                            if self.config.steps_per_volume > 0:
+                                slicers = slicers[: self.config.steps_per_volume]
+                            selected_slicers = [(slicer, "default") for slicer in slicers]
+                        for slicer, patch_kind in selected_slicers:
                             patch = torch.clone(volume[slicer][None], memory_format=torch.contiguous_format).to(self.device)
                             if self.config.dhga_stage == "A":
                                 with torch.no_grad():
@@ -273,12 +281,15 @@ class DHGAStageTrainer:
                                 if self.teacher is not None:
                                     self.teacher.update(self.model)
                             record = {"epoch": epoch + 1, "case": str(path), **metrics}
+                            record["patch_kind"] = patch_kind
                             history.append(record)
+                            epoch_records.append(record)
                             log_step = self.global_step if self.config.dhga_stage != "A" else len(history)
                             self._log_tensorboard_scalars(metrics, log_step)
                             self._maybe_log_visual_masks(patch, spacing, log_step)
-                            patch_bar.set_postfix({"loss": f"{float(metrics.get('loss', 0.0)):.4f}", "case": Path(path).name[:18]})
+                            patch_bar.set_postfix({"loss": f"{float(metrics.get('loss', 0.0)):.4f}", "kind": patch_kind, "case": Path(path).name[:18]})
                             patch_bar.update(1)
+                epoch_metrics = self._log_epoch_metrics(epoch + 1, epoch_records)
                 save_training_checkpoint(
                     self.save_dir / "checkpoint_last.pt",
                     self.model,
@@ -288,8 +299,10 @@ class DHGAStageTrainer:
                     scaler=self.scaler,
                     epoch=epoch + 1,
                     global_step=self.global_step,
-                    metadata={"stage": self.config.dhga_stage},
+                    metadata={"stage": self.config.dhga_stage, "epoch_metrics": epoch_metrics},
                 )
+                if self.config.dhga_stage == "B" and (epoch + 1) % self.config.dhga_validation_interval_epochs == 0:
+                    self._run_periodic_test_evaluation(epoch + 1)
         finally:
             if self.writer is not None:
                 self.writer.flush()
@@ -346,6 +359,96 @@ class DHGAStageTrainer:
         lo = torch.quantile(x.flatten(), 0.01)
         hi = torch.quantile(x.flatten(), 0.99)
         return ((x - lo) / (hi - lo).clamp_min(1e-6)).clamp(0, 1)
+
+    def _stage_b_patches_per_case(self) -> int:
+        return 3 if self.config.dhga_stage_b_include_background_patch else 2
+
+    def _stage_b_anchor_guided_slicers(self, volume, spacing: tuple[float, float, float], slicers: list) -> list[tuple[tuple, str]]:
+        if not slicers:
+            return []
+        candidate_count = min(len(slicers), max(self.config.dhga_stage_b_anchor_candidate_patches, self._stage_b_patches_per_case()))
+        candidates = slicers[:candidate_count]
+        scored = []
+        was_training = self.model.training
+        self.model.eval()
+        with torch.no_grad():
+            for slicer in candidates:
+                patch = torch.as_tensor(volume[slicer][None], device=self.device, dtype=torch.float32)
+                out = self.model.baseline_forward(patch, spacing) if hasattr(self.model, "baseline_forward") else self.model(patch, spacing, run_geometry=False)
+                anchor = out.anchor_prob.detach().float()
+                fg_score = float(anchor.mean().cpu())
+                boundary_score = float((1.0 - (anchor - 0.5).abs() * 2.0).clamp(0, 1).mean().cpu())
+                scored.append({"slicer": slicer, "fg": fg_score, "boundary": boundary_score, "bg": 1.0 - fg_score})
+        self.model.train(was_training)
+        selected: list[tuple[tuple, str]] = []
+        used: set[int] = set()
+
+        def add_best(score_key: str, kind: str) -> None:
+            for idx, item in sorted(enumerate(scored), key=lambda pair: pair[1][score_key], reverse=True):
+                if idx not in used:
+                    selected.append((item["slicer"], kind))
+                    used.add(idx)
+                    return
+
+        add_best("fg", "foreground")
+        add_best("boundary", "boundary")
+        if self.config.dhga_stage_b_include_background_patch:
+            add_best("bg", "background")
+        if len(selected) < self._stage_b_patches_per_case():
+            for idx, item in enumerate(scored):
+                if idx not in used:
+                    selected.append((item["slicer"], "fallback"))
+                    used.add(idx)
+                if len(selected) >= self._stage_b_patches_per_case():
+                    break
+        return selected
+
+    def _log_epoch_metrics(self, epoch: int, records: list[dict]) -> dict[str, float]:
+        numeric: dict[str, list[float]] = {}
+        for record in records:
+            for key, value in record.items():
+                if isinstance(value, (int, float)):
+                    numeric.setdefault(key, []).append(float(value))
+        metrics = {f"epoch_{key}": sum(values) / max(len(values), 1) for key, values in numeric.items()}
+        if self.writer is not None:
+            for key, value in metrics.items():
+                self.writer.add_scalar(f"epoch/{key}", value, epoch)
+        return metrics
+
+    def _run_periodic_test_evaluation(self, epoch: int) -> None:
+        label_dir = Path(self.config.val_label_dir)
+        if not self.config.val_label_dir or not label_dir.exists():
+            print(f"Skip test evaluation at epoch {epoch}: val_label_dir not found: {self.config.val_label_dir}")
+            return
+        from .config import DHGAConfig
+        from .evaluation import DHGAEvaluator
+
+        checkpoint_path = self.save_dir / "checkpoint_last.pt"
+        values = self.config.to_dict()
+        values["init_checkpoint"] = str(checkpoint_path)
+        values["resume_checkpoint"] = ""
+        if self.config.dhga_stage == "B":
+            values["dhga_geometry_enabled"] = False
+        eval_config = DHGAConfig.from_mapping(values)
+        eval_dir = self.save_dir / f"eval_epoch_{epoch:04d}"
+        evaluator = DHGAEvaluator(eval_config, self.prompts, eval_dir, self.config.val_label_dir, self.config.label_values)
+        metrics = evaluator.evaluate_split("test", 0)
+        if self.writer is not None:
+            for key in ("mean_dice", "mean_iou", "mean_precision", "mean_recall"):
+                value = metrics.get(key)
+                if value is not None:
+                    self.writer.add_scalar(f"test/{key}", float(value), epoch)
+        save_training_checkpoint(
+            self.save_dir / f"checkpoint_epoch_{epoch:04d}.pt",
+            self.model,
+            self.config,
+            optimizer=self.optimizer,
+            ema=self.teacher if self.teacher is not None else None,
+            scaler=self.scaler,
+            epoch=epoch,
+            global_step=self.global_step,
+            metadata={"stage": self.config.dhga_stage, "test_metrics": {k: v for k, v in metrics.items() if k != "rows"}},
+        )
 
     def training_step(self, patch: Tensor, spacing: tuple[float, float, float]) -> tuple[Tensor, dict[str, float]]:
         stage = self.config.dhga_stage
@@ -421,7 +524,20 @@ class DHGAStageTrainer:
             + self.config.dhga_cross_supervision_weight * cross
             + 0.1 * router_loss
         )
-        metrics = diagnostics_from_probs(strong_out.semantic_prob, strong_out.appearance_prob, teacher_out.router)
+        student_sem = strong_out.semantic_prob.detach().float()
+        student_app = strong_out.appearance_prob.detach().float()
+        sem_centered = student_sem - student_sem.mean()
+        app_centered = student_app - student_app.mean()
+        student_corr = (sem_centered * app_centered).mean() / (sem_centered.square().mean().sqrt() * app_centered.square().mean().sqrt()).clamp_min(1e-6)
+        metrics = {
+            "dhga_student_sem_fg_prob": float(student_sem.mean().cpu()),
+            "dhga_student_app_fg_prob": float(student_app.mean().cpu()),
+            "dhga_student_expert_corr": float(student_corr.cpu()),
+            "dhga_teacher_disagreement_ratio": float((teacher_out.router.disagreement > 0.5).float().mean().detach().cpu()),
+            "dhga_teacher_stable_fg_ratio": float((teacher_out.router.stable_foreground > 0.5).float().mean().detach().cpu()),
+            "dhga_teacher_stable_bg_ratio": float((teacher_out.router.stable_background > 0.5).float().mean().detach().cpu()),
+            "dhga_teacher_cross_supervision_weight": float(teacher_out.router.cross_supervision_weight.detach().mean().cpu()),
+        }
         metrics.update({
             "loss": float(loss.detach().cpu()),
             "dhga_anchor_loss": float(anchor_loss.detach().cpu()),

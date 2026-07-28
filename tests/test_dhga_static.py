@@ -340,6 +340,32 @@ class DHGAStaticTests(unittest.TestCase):
         self.assertEqual(float(loss), 0.0)
         self.assertEqual(metrics["dhga_stage_a_forced_baseline"], 1.0)
 
+    def test_stage_b_anchor_guided_patch_selection(self):
+        class FakeAnchor(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.training_restored = False
+
+            def baseline_forward(self, patch, spacing):
+                prob = patch[:, :1].clamp(0, 1)
+                return SimpleNamespace(anchor_prob=prob)
+
+        trainer = DHGAStageTrainer.__new__(DHGAStageTrainer)
+        trainer.config = DHGAConfig(dhga_stage_b_anchor_candidate_patches=3, dhga_stage_b_include_background_patch=True)
+        trainer.model = FakeAnchor()
+        trainer.device = torch.device("cpu")
+        volume = torch.zeros(1, 3, 2, 2)
+        volume[:, 0] = 0.95
+        volume[:, 1] = 0.50
+        volume[:, 2] = 0.05
+        slicers = [
+            (slice(None), slice(0, 1), slice(None), slice(None)),
+            (slice(None), slice(1, 2), slice(None), slice(None)),
+            (slice(None), slice(2, 3), slice(None), slice(None)),
+        ]
+        selected = trainer._stage_b_anchor_guided_slicers(volume, (1.0, 1.0, 1.0), slicers)
+        self.assertEqual([kind for _, kind in selected], ["foreground", "boundary", "background"])
+
     def test_stage_trainable_parameter_sets(self):
         class FakeLoRA(torch.nn.Module):
             def __init__(self):

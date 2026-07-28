@@ -104,7 +104,7 @@ class DHGAVoxTellModel(nn.Module):
         self._printed_encoder_plan = False
         if config.dhga_freeze_voxtell:
             freeze_module(self.network)
-        self.injected_lora = inject_lora_into_voxtell_decoder(
+        self.injected_lora = inject_lora_into_voxtell_decoder(  # decoder的cross attention增加lora
             self.network,
             rank=config.dhga_semantic_adapter_rank,
             alpha=float(config.dhga_semantic_adapter_rank) * 2.0,

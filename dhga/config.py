@@ -22,9 +22,14 @@ class DHGAConfig:
     amp: bool = True
     seed: int = 0
     max_cases: int = 0
+    val_label_dir: str = "/data/zy/CT_MRI_DATA_3D/labels/P0"
+    label_values: list[int] = field(default_factory=lambda: [5])
     tensorboard_enabled: bool = True
     tensorboard_log_interval: int = 1
     tensorboard_image_interval: int = 50
+    dhga_stage_b_anchor_candidate_patches: int = 24
+    dhga_stage_b_include_background_patch: bool = True
+    dhga_validation_interval_epochs: int = 2
     init_checkpoint: str = ""
     resume_checkpoint: str = ""
     dhga_ema_warmup_steps: int = 10
@@ -75,6 +80,10 @@ class DHGAConfig:
             raise ValueError("lr must be positive")
         if self.tensorboard_log_interval <= 0 or self.tensorboard_image_interval <= 0:
             raise ValueError("tensorboard intervals must be positive")
+        if self.dhga_stage_b_anchor_candidate_patches <= 0:
+            raise ValueError("dhga_stage_b_anchor_candidate_patches must be positive")
+        if self.dhga_validation_interval_epochs <= 0:
+            raise ValueError("dhga_validation_interval_epochs must be positive")
         if self.dhga_semantic_adapter_rank <= 0:
             raise ValueError("dhga_semantic_adapter_rank must be positive")
         if self.dhga_semantic_adapter_target not in {"cross", "self", "both"}:

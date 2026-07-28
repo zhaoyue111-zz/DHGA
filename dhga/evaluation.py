@@ -67,6 +67,9 @@ class DHGAEvaluator:
         metrics = {
             "rows": rows,
             "mean_dice": float(np.mean([r["dice"] for r in rows if "dice" in r])) if any("dice" in r for r in rows) else None,
+            "mean_iou": float(np.mean([r["iou"] for r in rows if "iou" in r])) if any("iou" in r for r in rows) else None,
+            "mean_precision": float(np.mean([r["precision"] for r in rows if "precision" in r])) if any("precision" in r for r in rows) else None,
+            "mean_recall": float(np.mean([r["recall"] for r in rows if "recall" in r])) if any("recall" in r for r in rows) else None,
         }
         (self.save_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
         return metrics
