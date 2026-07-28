@@ -179,15 +179,10 @@ class DHGAVoxTellModel(nn.Module):
     @contextmanager
     def appearance_disabled(self):
         old_training = self.appearance_expert.training
-        old_requires_grad = [param.requires_grad for param in self.appearance_expert.parameters()]
         self.appearance_expert.eval()
-        for param in self.appearance_expert.parameters():
-            param.requires_grad_(False)
         try:
             yield
         finally:
-            for param, state in zip(self.appearance_expert.parameters(), old_requires_grad):
-                param.requires_grad_(state)
             self.appearance_expert.train(old_training)
 
     def forward(self, image: Tensor, spacing: tuple[float, float, float] = (1.0, 1.0, 1.0), run_geometry: bool = True) -> DHGAForwardOutput:

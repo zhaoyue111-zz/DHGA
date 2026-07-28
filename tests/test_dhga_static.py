@@ -23,7 +23,7 @@ from dhga.trainer import DHGASmokeModel, run_synthetic_smoke
 from dhga.trainer import DHGAStageTrainer
 from dhga.teacher import EMATeacher
 from dhga.evaluation import compute_binary_case_metrics, connected_components_3d, spacing_from_reader_properties, write_float_volume_like_reader
-from dhga.voxtell_model import PromptConditionedRayTokens
+from dhga.voxtell_model import DHGAVoxTellModel, PromptConditionedRayTokens
 
 
 class DHGAStaticTests(unittest.TestCase):
@@ -317,6 +317,24 @@ class DHGAStaticTests(unittest.TestCase):
         grads = [param.grad for param in router.parameters() if param.requires_grad]
         self.assertTrue(any(grad is not None and bool((grad.abs() > 0).any()) for grad in grads))
 
+    def test_stage_b_router_target_loss_backpropagates_when_cross_weight_is_zero(self):
+        router = DisagreementRouter("none")
+        sem = torch.rand(1, 1, 4, 4, 4)
+        app = 1.0 - sem
+        student = SimpleNamespace(router=router(sem, app))
+        teacher = SimpleNamespace(
+            semantic_prob=sem.detach(),
+            appearance_prob=app.detach(),
+            anchor_prob=sem.detach(),
+            router=router(sem.detach(), app.detach()),
+        )
+        trainer = DHGAStageTrainer.__new__(DHGAStageTrainer)
+        loss = trainer._router_target_loss(student, teacher, min_weight=0.05)
+        loss.backward()
+        grads = [param.grad for param in router.parameters() if param.requires_grad]
+        self.assertGreater(float(loss.detach()), 0.0)
+        self.assertTrue(any(grad is not None and bool((grad.abs() > 0).any()) for grad in grads))
+
     def test_stage_a_uses_baseline_forward(self):
         class FakeBaseline(torch.nn.Module):
             def __init__(self):
@@ -411,6 +429,83 @@ class DHGAStaticTests(unittest.TestCase):
             trainer._set_stage_trainability()
             trainable = {name for name, param in trainer.model.named_parameters() if param.requires_grad}
             self.assertEqual(trainable, names)
+
+    def test_stage_b_trainability_validation_requires_lora_appearance_and_router(self):
+        class FakeStageModel(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.injected_lora = torch.nn.ModuleDict()
+                self.appearance_expert = torch.nn.Linear(1, 1)
+                self.router = torch.nn.Conv3d(1, 1, 1)
+                self.geometry_head = torch.nn.Linear(1, 1)
+                self.ray_tokens = torch.nn.Linear(1, 1)
+                self.geometry_visual_proj = torch.nn.Conv3d(1, 1, 1)
+
+        trainer = DHGAStageTrainer.__new__(DHGAStageTrainer)
+        trainer.config = DHGAConfig(dhga_stage="B")
+        trainer.model = FakeStageModel()
+        trainer._set_stage_trainability()
+        with self.assertRaises(RuntimeError):
+            trainer._validate_stage_trainability()
+
+    def test_gradient_group_metrics_report_nonzero_stage_b_groups(self):
+        class FakeLoRA(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.base = torch.nn.Linear(1, 1)
+                self.delta = torch.nn.Linear(1, 1)
+
+        class FakeStageModel(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.injected_lora = torch.nn.ModuleDict({"x": FakeLoRA()})
+                self.appearance_expert = torch.nn.Linear(1, 1)
+                self.router = torch.nn.Conv3d(1, 1, 1)
+                self.geometry_head = torch.nn.Linear(1, 1)
+                self.ray_tokens = torch.nn.Linear(1, 1)
+                self.geometry_visual_proj = torch.nn.Conv3d(1, 1, 1)
+
+        trainer = DHGAStageTrainer.__new__(DHGAStageTrainer)
+        trainer.config = DHGAConfig(dhga_stage="B")
+        trainer.model = FakeStageModel()
+        trainer._set_stage_trainability()
+        trainer._validate_stage_trainability()
+        for _, param in trainer.model.named_parameters():
+            if param.requires_grad:
+                param.grad = torch.ones_like(param)
+        metrics = trainer._gradient_group_metrics()
+        self.assertGreater(metrics["dhga_grad_semantic_lora_norm"], 0.0)
+        self.assertGreater(metrics["dhga_grad_appearance_expert_norm"], 0.0)
+        self.assertGreater(metrics["dhga_grad_router_norm"], 0.0)
+        self.assertEqual(metrics["dhga_grad_semantic_lora_trainable_tensors"], 2.0)
+        self.assertEqual(metrics["dhga_grad_router_trainable_tensors"], 2.0)
+
+    def test_stage_b_gradient_validation_catches_disconnected_groups(self):
+        trainer = DHGAStageTrainer.__new__(DHGAStageTrainer)
+        trainer.config = DHGAConfig(dhga_stage="B")
+        metrics = {
+            "dhga_grad_semantic_lora_tensors": 0.0,
+            "dhga_grad_semantic_lora_trainable_tensors": 48.0,
+            "dhga_grad_appearance_expert_tensors": 6.0,
+            "dhga_grad_router_tensors": 0.0,
+            "dhga_grad_router_trainable_tensors": 4.0,
+        }
+        with self.assertRaises(RuntimeError):
+            trainer._validate_required_gradient_flow(metrics)
+
+    def test_appearance_disabled_does_not_change_requires_grad(self):
+        class TinyDHGA(DHGAVoxTellModel):
+            def __init__(self):
+                torch.nn.Module.__init__(self)
+                self.appearance_expert = torch.nn.Linear(1, 1)
+
+        model = TinyDHGA()
+        before = [param.requires_grad for param in model.appearance_expert.parameters()]
+        with model.appearance_disabled():
+            inside = [param.requires_grad for param in model.appearance_expert.parameters()]
+        after = [param.requires_grad for param in model.appearance_expert.parameters()]
+        self.assertEqual(inside, before)
+        self.assertEqual(after, before)
 
     def test_invalid_ray_keeps_near_zero_displacement(self):
         offsets = make_ray_offsets_mm(2.0, 1.0)

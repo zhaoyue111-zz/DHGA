@@ -17,7 +17,7 @@ from .experts import AppearanceExpert, SemanticExpert
 from .geometry import GeometryTransportHead, extract_boundary_points, make_ray_offsets_mm, mask_to_sdf
 from .geometry.boundary_corruption import make_local_boundary_corruption
 from .geometry.ray_sampler import sample_along_normals
-from .losses import boundary_recovery_loss, cross_supervision_loss, diagnostics_from_probs, minimal_transport_loss, router_fusion_loss, weighted_bce_prob
+from .losses import boundary_recovery_loss, cross_supervision_loss, diagnostics_from_probs, minimal_transport_loss, weighted_bce_prob
 from .routing import DisagreementRouter
 from .shared_voxtell import SharedEncoderOnce, trainable_parameter_summary
 from .teacher import EMATeacher
@@ -111,6 +111,7 @@ class DHGAStageTrainer:
         self.model, self.predictor, self.prompts = build_dhga_voxtell_model(config, prompts)
         self.device = next(self.model.parameters()).device
         self._set_stage_trainability()
+        self._validate_stage_trainability()
         self.optimizer = None if config.dhga_stage == "A" else self._build_optimizer()
         self.scaler = torch.amp.GradScaler("cuda", enabled=config.amp and self.device.type == "cuda")
         self.teacher = EMATeacher(self.model, config.dhga_ema_decay) if config.dhga_use_ema_teacher else None
@@ -121,12 +122,124 @@ class DHGAStageTrainer:
         self._init_io()
         self.writer = self._init_tensorboard()
         print(json.dumps(self.model.trainable_summary(), indent=2))
+        print(json.dumps(self._trainable_group_summary(), indent=2))
 
     def _build_optimizer(self) -> torch.optim.Optimizer:
         params = [p for p in self.model.parameters() if p.requires_grad]
         if not params:
             raise RuntimeError(f"No trainable parameters for Stage {self.config.dhga_stage}")
         return torch.optim.AdamW(params, lr=self.config.lr, weight_decay=self.config.weight_decay, foreach=False)
+
+    def _stage_parameter_groups(self) -> dict[str, list[tuple[str, nn.Parameter]]]:
+        lora_ids: set[int] = set()
+        for module in getattr(self.model, "injected_lora", {}).values():
+            for name, param in module.named_parameters():
+                if not name.startswith("base."):
+                    lora_ids.add(id(param))
+        groups = {
+            "semantic_lora": [],
+            "appearance_expert": [],
+            "router": [],
+            "geometry": [],
+            "other": [],
+        }
+        for name, param in self.model.named_parameters():
+            if id(param) in lora_ids or ("lora" in name.lower() and ".base." not in name):
+                groups["semantic_lora"].append((name, param))
+            elif name.startswith("appearance_expert."):
+                groups["appearance_expert"].append((name, param))
+            elif name.startswith("router."):
+                groups["router"].append((name, param))
+            elif name.startswith(("geometry_head.", "ray_tokens.", "geometry_visual_proj.")):
+                groups["geometry"].append((name, param))
+            else:
+                groups["other"].append((name, param))
+        return groups
+
+    def _trainable_group_summary(self) -> dict[str, dict[str, object]]:
+        summary: dict[str, dict[str, object]] = {}
+        for group, items in self._stage_parameter_groups().items():
+            trainable = [(name, param) for name, param in items if param.requires_grad]
+            summary[f"stage_{self.config.dhga_stage}.{group}"] = {
+                "trainable_params": int(sum(param.numel() for _, param in trainable)),
+                "trainable_tensors": len(trainable),
+                "sample_names": [name for name, _ in trainable[:12]],
+            }
+        return summary
+
+    def _validate_stage_trainability(self) -> None:
+        groups = self._stage_parameter_groups()
+        trainable = {group: [(name, param) for name, param in items if param.requires_grad] for group, items in groups.items()}
+        stage = self.config.dhga_stage
+        required = {
+            "B": ("semantic_lora", "appearance_expert", "router"),
+            "C": ("geometry",),
+            "D": ("router", "geometry"),
+        }.get(stage, ())
+        missing = [group for group in required if not trainable[group]]
+        if missing:
+            available = {group: [name for name, _ in items[:8]] for group, items in trainable.items() if items}
+            raise RuntimeError(
+                f"Stage {stage} has no trainable parameters for required group(s): {missing}. "
+                f"Available trainable groups: {available}"
+            )
+        if stage == "B" and trainable["geometry"]:
+            raise RuntimeError("Stage B unexpectedly enables geometry parameters")
+        if stage in {"C", "D"} and (trainable["semantic_lora"] or trainable["appearance_expert"]):
+            raise RuntimeError(f"Stage {stage} unexpectedly enables region-expert parameters")
+
+    def _gradient_group_metrics(self) -> dict[str, float]:
+        metrics: dict[str, float] = {}
+        for group, items in self._stage_parameter_groups().items():
+            trainable_items = [(name, param) for name, param in items if param.requires_grad]
+            total_sq = 0.0
+            tensors_with_grad = 0
+            tensors_nonzero_grad = 0
+            for _, param in trainable_items:
+                if param.grad is None:
+                    continue
+                grad = param.grad.detach().float()
+                tensors_with_grad += 1
+                grad_norm = grad.norm()
+                total_sq += float(grad_norm.cpu()) ** 2
+                if bool((grad.abs() > 0).any().cpu()):
+                    tensors_nonzero_grad += 1
+            metrics[f"dhga_grad_{group}_norm"] = total_sq ** 0.5
+            metrics[f"dhga_grad_{group}_tensors"] = float(tensors_with_grad)
+            metrics[f"dhga_grad_{group}_nonzero_tensors"] = float(tensors_nonzero_grad)
+            metrics[f"dhga_grad_{group}_trainable_tensors"] = float(len(trainable_items))
+            metrics[f"dhga_grad_{group}_trainable_params"] = float(sum(param.numel() for _, param in trainable_items))
+        return metrics
+
+    def _validate_required_gradient_flow(self, metrics: dict[str, float]) -> None:
+        required = {
+            "B": ("semantic_lora", "appearance_expert", "router"),
+            "C": ("geometry",),
+            "D": ("router", "geometry"),
+        }.get(self.config.dhga_stage, ())
+        missing = [
+            group
+            for group in required
+            if metrics.get(f"dhga_grad_{group}_tensors", 0.0) <= 0.0
+        ]
+        if missing:
+            debug = {
+                group: {
+                    "trainable_tensors": metrics.get(f"dhga_grad_{group}_trainable_tensors", 0.0),
+                    "grad_tensors": metrics.get(f"dhga_grad_{group}_tensors", 0.0),
+                    "nonzero_grad_tensors": metrics.get(f"dhga_grad_{group}_nonzero_tensors", 0.0),
+                    "grad_norm": metrics.get(f"dhga_grad_{group}_norm", 0.0),
+                }
+                for group in missing
+            }
+            debug["autograd"] = {
+                key: value
+                for key, value in metrics.items()
+                if key.startswith("dhga_debug_")
+            }
+            raise RuntimeError(
+                f"Stage {self.config.dhga_stage} loss is not connected to required trainable group(s): {debug}"
+            )
 
     def _set_stage_trainability(self) -> None:
         for param in self.model.parameters():
@@ -185,6 +298,7 @@ class DHGAStageTrainer:
             if self.teacher is not None:
                 self.teacher.sync_from(self.model)
             self._set_stage_trainability()
+            self._validate_stage_trainability()
             self.optimizer = None if self.config.dhga_stage == "A" else self._build_optimizer()
 
     def _init_io(self) -> None:
@@ -270,11 +384,14 @@ class DHGAStageTrainer:
                                 with torch.no_grad():
                                     loss, metrics = self.training_step(patch, spacing=spacing)
                             else:
+                                self._set_stage_trainability()
                                 with torch.autocast(self.device.type, enabled=self.config.amp and self.device.type == "cuda"):
                                     loss, metrics = self.training_step(patch, spacing=spacing)
                                 self.optimizer.zero_grad(set_to_none=True)
                                 self.scaler.scale(loss).backward()
                                 self.scaler.unscale_(self.optimizer)
+                                metrics.update(self._gradient_group_metrics())
+                                self._validate_required_gradient_flow(metrics)
                                 torch.nn.utils.clip_grad_norm_([p for p in self.model.parameters() if p.requires_grad], 1.0)
                                 self.scaler.step(self.optimizer)
                                 self.scaler.update()
@@ -541,16 +658,17 @@ class DHGAStageTrainer:
 
     def _stage_b(self, patch: Tensor, spacing: tuple[float, float, float]) -> tuple[Tensor, dict[str, float]]:
         weak, strong, _ = weak_strong_intensity_views(patch)
-        teacher_out = self._teacher_forward(weak, spacing, run_geometry=False)
+        with torch.autocast(self.device.type, enabled=False):
+            teacher_out = self._teacher_forward(weak.float(), spacing, run_geometry=False)
         strong_out = self.model(strong, spacing, run_geometry=False)
         stable_anchor = ((teacher_out.anchor_prob.detach() > 0.9) | (teacher_out.anchor_prob.detach() < 0.1)).float()
         anchor_loss = weighted_bce_prob(strong_out.semantic_prob, teacher_out.anchor_prob.detach(), stable_anchor)
         weak_strong = F.mse_loss(strong_out.semantic_prob, teacher_out.semantic_prob.detach()) + F.mse_loss(strong_out.appearance_prob, teacher_out.appearance_prob.detach())
-        weight = teacher_out.router.cross_supervision_weight.detach()
-        sem_from_teacher_app = weighted_bce_prob(strong_out.semantic_prob, teacher_out.appearance_prob.detach(), weight)
-        app_from_teacher_sem = weighted_bce_prob(strong_out.appearance_prob, teacher_out.semantic_prob.detach(), weight)
+        cross_weight = teacher_out.router.cross_supervision_weight.detach()
+        sem_from_teacher_app = weighted_bce_prob(strong_out.semantic_prob, teacher_out.appearance_prob.detach(), cross_weight)
+        app_from_teacher_sem = weighted_bce_prob(strong_out.appearance_prob, teacher_out.semantic_prob.detach(), cross_weight)
         cross = 0.5 * (sem_from_teacher_app + app_from_teacher_sem)
-        router_loss = router_fusion_loss(strong_out.router, 0.5 * (teacher_out.semantic_prob + teacher_out.appearance_prob), weight)
+        router_loss = self._router_target_loss(strong_out, teacher_out, min_weight=0.05)
         loss = (
             self.config.dhga_anchor_weight * anchor_loss
             + self.config.dhga_weak_strong_weight * weak_strong
@@ -563,6 +681,11 @@ class DHGAStageTrainer:
         app_centered = student_app - student_app.mean()
         student_corr = (sem_centered * app_centered).mean() / (sem_centered.square().mean().sqrt() * app_centered.square().mean().sqrt()).clamp_min(1e-6)
         metrics = {
+            "dhga_debug_loss_requires_grad": float(loss.requires_grad),
+            "dhga_debug_semantic_prob_requires_grad": float(strong_out.semantic_prob.requires_grad),
+            "dhga_debug_appearance_prob_requires_grad": float(strong_out.appearance_prob.requires_grad),
+            "dhga_debug_router_w_sem_requires_grad": float(strong_out.router.w_sem.requires_grad),
+            "dhga_debug_router_w_geo_requires_grad": float(strong_out.router.w_geo.requires_grad),
             "dhga_student_sem_fg_prob": float(student_sem.mean().cpu()),
             "dhga_student_app_fg_prob": float(student_app.mean().cpu()),
             "dhga_student_expert_corr": float(student_corr.cpu()),
@@ -570,13 +693,14 @@ class DHGAStageTrainer:
             "dhga_teacher_stable_fg_ratio": float((teacher_out.router.stable_foreground > 0.5).float().mean().detach().cpu()),
             "dhga_teacher_stable_bg_ratio": float((teacher_out.router.stable_background > 0.5).float().mean().detach().cpu()),
             "dhga_teacher_cross_supervision_weight": float(teacher_out.router.cross_supervision_weight.detach().mean().cpu()),
+            "dhga_router_supervision_weight": float(self._router_supervision_weight(teacher_out, 0.05).detach().mean().cpu()),
         }
         metrics.update({
             "loss": float(loss.detach().cpu()),
             "dhga_anchor_loss": float(anchor_loss.detach().cpu()),
             "dhga_weak_strong_loss": float(weak_strong.detach().cpu()),
             "dhga_cross_supervision_loss": float(cross.detach().cpu()),
-            "dhga_router_fusion_loss": float(router_loss.detach().cpu()),
+            "dhga_router_target_loss": float(router_loss.detach().cpu()),
         })
         return loss, metrics
 
@@ -724,7 +848,15 @@ class DHGAStageTrainer:
     def _prompt_ranking_loss(self, out) -> Tensor:
         return out.semantic_prob.new_zeros(())
 
-    def _stage_d_router_target_loss(self, student_out, teacher_out) -> Tensor:
+    def _router_supervision_weight(self, teacher_out, min_weight: float = 0.0) -> Tensor:
+        weight = (
+            teacher_out.router.stable_foreground
+            + teacher_out.router.stable_background
+            + teacher_out.router.disagreement
+        )
+        return weight.detach().clamp(0, 1).clamp_min(float(min_weight))
+
+    def _router_target_loss(self, student_out, teacher_out, min_weight: float = 0.0) -> Tensor:
         with torch.no_grad():
             teacher_disagreement = (teacher_out.semantic_prob - teacher_out.appearance_prob).abs()
             sem_reliability = 1.0 - (teacher_out.semantic_prob - teacher_out.anchor_prob).abs()
@@ -732,8 +864,10 @@ class DHGAStageTrainer:
             geo_reliability = teacher_disagreement
             target = torch.cat([sem_reliability, app_reliability, geo_reliability], dim=1).clamp_min(0.0)
             target = target / target.sum(dim=1, keepdim=True).clamp_min(1e-6)
-            weight = teacher_out.router.stable_foreground + teacher_out.router.stable_background + teacher_out.router.disagreement
-            weight = weight.detach().clamp(0, 1)
+            weight = self._router_supervision_weight(teacher_out, min_weight)
         pred = torch.cat([student_out.router.w_sem, student_out.router.w_app, student_out.router.w_geo], dim=1)
         loss = (pred - target.detach()).square().sum(dim=1, keepdim=True)
         return (loss * weight).sum() / weight.sum().clamp_min(1.0)
+
+    def _stage_d_router_target_loss(self, student_out, teacher_out) -> Tensor:
+        return self._router_target_loss(student_out, teacher_out, min_weight=0.0)
