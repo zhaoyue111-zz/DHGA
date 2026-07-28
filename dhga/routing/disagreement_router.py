@@ -54,8 +54,20 @@ def _sampled_case_quantile(
         raise ValueError("Cannot calculate a quantile of an empty tensor")
 
     if num_voxels > max_samples:
-        # 均匀覆盖整个扁平体积；不使用随机采样，保证结果可复现。
-        indices = torch.linspace(0,num_voxels - 1, steps=max_samples,device=flat.device,).round().long()
+        # 全程使用 int64，避免完整体积很大时 float32 linspace
+        # 将 num_voxels - 1 舍入成越界的 num_voxels。
+        positions = torch.arange(max_samples,device=flat.device,dtype=torch.int64,)
+        indices = torch.div(positions * (num_voxels - 1),max_samples - 1,rounding_mode="floor",)
+
+        # 显式保证首尾索引正确。
+        indices[0] = 0
+        indices[-1] = num_voxels - 1
+
+        # 提前在这里给出清晰错误，而不是延迟到后续 CUDA 算子。
+        index_min = int(indices.min().item())
+        index_max = int(indices.max().item())
+        if index_min < 0 or index_max >= num_voxels:
+            raise RuntimeError(f"Quantile sampling produced invalid indices: min={index_min}, max={index_max}, num_voxels={num_voxels}, max_samples={max_samples}")
         sampled = flat.index_select(-1, indices)
     else:
         sampled = flat
