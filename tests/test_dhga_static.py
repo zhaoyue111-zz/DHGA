@@ -1,6 +1,7 @@
 from pathlib import Path
 from types import SimpleNamespace
 import json
+import random
 import sys
 import tempfile
 import unittest
@@ -362,9 +363,10 @@ class DHGAStaticTests(unittest.TestCase):
         class FakeAnchor(torch.nn.Module):
             def __init__(self):
                 super().__init__()
-                self.training_restored = False
+                self.calls = 0
 
             def baseline_forward(self, patch, spacing):
+                self.calls += 1
                 prob = patch[:, :1].clamp(0, 1)
                 return SimpleNamespace(anchor_prob=prob)
 
@@ -384,11 +386,15 @@ class DHGAStaticTests(unittest.TestCase):
             (slice(None), slice(2, 3), slice(None), slice(None)),
             (slice(None), slice(3, 4), slice(None), slice(None)),
         ]
+        random.seed(7)
         selected = trainer._stage_b_anchor_guided_slicers("case_a", volume, (1.0, 1.0, 1.0), slicers)
         self.assertEqual([kind for _, kind in selected], ["foreground", "boundary", "background"])
-        self.assertEqual(selected[2][0], slicers[2])
+        self.assertEqual(trainer.model.calls, 4)
+        self.assertEqual(len(trainer.stage_b_anchor_cache["case_a"]), 4)
+        random.seed(11)
         cached = trainer._stage_b_anchor_guided_slicers("case_a", volume * 0, (1.0, 1.0, 1.0), list(reversed(slicers)))
-        self.assertEqual(cached, selected)
+        self.assertEqual([kind for _, kind in cached], ["foreground", "boundary", "background"])
+        self.assertEqual(trainer.model.calls, 4)
 
     def test_epoch_metrics_include_distribution_summary(self):
         trainer = DHGAStageTrainer.__new__(DHGAStageTrainer)
@@ -580,6 +586,15 @@ class DHGAStaticTests(unittest.TestCase):
             "iou",
             "precision",
             "recall",
+            "fused_dice",
+            "semantic_dice",
+            "semantic_iou",
+            "semantic_precision",
+            "semantic_recall",
+            "appearance_dice",
+            "appearance_iou",
+            "appearance_precision",
+            "appearance_recall",
             "fp_voxels",
             "fn_voxels",
             "pred_gt_volume_ratio",

@@ -117,7 +117,7 @@ class DHGAStageTrainer:
         self.teacher = EMATeacher(self.model, config.dhga_ema_decay) if config.dhga_use_ema_teacher else None
         self.start_epoch = 0
         self.global_step = 0
-        self.stage_b_anchor_cache: dict[str, list[tuple[tuple, str]]] = {}
+        self.stage_b_anchor_cache: dict[str, list[dict]] = {}
         self._load_initial_or_resume()
         self._init_io()
         self.writer = self._init_tensorboard()
@@ -489,45 +489,69 @@ class DHGAStageTrainer:
         if not slicers:
             return []
         cache_key = str(path)
-        if cache_key in self.stage_b_anchor_cache:
-            return self.stage_b_anchor_cache[cache_key]
-        candidate_count = min(len(slicers), max(self.config.dhga_stage_b_anchor_candidate_patches, self._stage_b_patches_per_case()))
-        candidates = slicers[:candidate_count]
-        scored = []
-        was_training = self.model.training
-        self.model.eval()
-        with torch.no_grad():
-            for slicer in candidates:
-                patch = torch.as_tensor(volume[slicer][None], device=self.device, dtype=torch.float32)
-                out = self.model.baseline_forward(patch, spacing) if hasattr(self.model, "baseline_forward") else self.model(patch, spacing, run_geometry=False)
-                anchor = out.anchor_prob.detach().float()
-                body_ratio = float((patch[:, :1].detach().float().abs() > 1e-3).float().mean().cpu())
-                fg_score = float(anchor.mean().cpu())
-                boundary_score = float((1.0 - (anchor - 0.5).abs() * 2.0).clamp(0, 1).mean().cpu())
-                scored.append({"slicer": slicer, "fg": fg_score, "boundary": boundary_score, "bg": (1.0 - fg_score) * body_ratio, "body": body_ratio})
-        self.model.train(was_training)
+        if cache_key not in self.stage_b_anchor_cache:
+            candidate_count = min(len(slicers), max(self.config.dhga_stage_b_anchor_candidate_patches, self._stage_b_patches_per_case()))
+            candidates = slicers[:candidate_count]
+            scored = []
+            was_training = self.model.training
+            self.model.eval()
+            with torch.no_grad():
+                for candidate_idx, slicer in enumerate(candidates):
+                    patch = torch.as_tensor(volume[slicer][None], device=self.device, dtype=torch.float32)
+                    out = self.model.baseline_forward(patch, spacing) if hasattr(self.model, "baseline_forward") else self.model(patch, spacing, run_geometry=False)
+                    anchor = out.anchor_prob.detach().float()
+                    body_ratio = float((patch[:, :1].detach().float().abs() > 1e-3).float().mean().cpu())
+                    fg_score = float(anchor.mean().cpu())
+                    boundary_score = float((1.0 - (anchor - 0.5).abs() * 2.0).clamp(0, 1).mean().cpu())
+                    scored.append({
+                        "slicer": slicer,
+                        "candidate_idx": candidate_idx,
+                        "fg": fg_score,
+                        "boundary": boundary_score,
+                        "bg": (1.0 - fg_score) * body_ratio,
+                        "body": body_ratio,
+                    })
+            self.model.train(was_training)
+            self.stage_b_anchor_cache[cache_key] = scored
+        scored = self.stage_b_anchor_cache[cache_key]
         selected: list[tuple[tuple, str]] = []
         used: set[int] = set()
 
-        def add_best(score_key: str, kind: str) -> None:
-            for idx, item in sorted(enumerate(scored), key=lambda pair: pair[1][score_key], reverse=True):
+        def add_random_from_top(score_key: str, kind: str, body_min: float = 0.0) -> None:
+            ranked = [
+                (idx, item)
+                for idx, item in sorted(enumerate(scored), key=lambda pair: pair[1][score_key], reverse=True)
+                if idx not in used and item.get("body", 0.0) >= body_min
+            ]
+            if not ranked:
+                ranked = [
+                    (idx, item)
+                    for idx, item in sorted(enumerate(scored), key=lambda pair: pair[1][score_key], reverse=True)
+                    if idx not in used
+                ]
+            if not ranked:
+                return
+            pool_size = min(len(ranked), max(2, min(8, max(1, len(ranked) // 4))))
+            idx, item = random.choice(ranked[:pool_size])
+            selected.append((item["slicer"], kind))
+            used.add(idx)
+
+        def add_best_unused(kind: str) -> None:
+            for idx, item in enumerate(scored):
                 if idx not in used:
                     selected.append((item["slicer"], kind))
                     used.add(idx)
                     return
 
-        add_best("fg", "foreground")
-        add_best("boundary", "boundary")
+        add_random_from_top("fg", "foreground")
+        add_random_from_top("boundary", "boundary")
         if self._stage_b_patches_per_case() >= 3 and self.config.dhga_stage_b_include_background_patch:
-            add_best("bg", "background")
-        if len(selected) < self._stage_b_patches_per_case():
-            for idx, item in enumerate(scored):
-                if idx not in used:
-                    selected.append((item["slicer"], "fallback"))
-                    used.add(idx)
-                if len(selected) >= self._stage_b_patches_per_case():
-                    break
-        self.stage_b_anchor_cache[cache_key] = selected
+            add_random_from_top("bg", "background", body_min=0.02)
+        while len(selected) < self._stage_b_patches_per_case():
+            before = len(selected)
+            add_best_unused("fallback")
+            if len(selected) == before:
+                break
         return selected
 
     def _log_epoch_metrics(self, epoch: int, records: list[dict]) -> dict[str, float]:
@@ -584,9 +608,8 @@ class DHGAStageTrainer:
         finally:
             self.model.train(was_training)
         if self.writer is not None:
-            for key in ("mean_dice", "mean_iou", "mean_precision", "mean_recall"):
-                value = metrics.get(key)
-                if value is not None:
+            for key, value in metrics.items():
+                if key != "rows" and isinstance(value, (int, float)) and value is not None:
                     self.writer.add_scalar(f"test/{key}", float(value), epoch)
         save_training_checkpoint(
             self.save_dir / f"checkpoint_epoch_{epoch:04d}.pt",
@@ -680,6 +703,12 @@ class DHGAStageTrainer:
         sem_centered = student_sem - student_sem.mean()
         app_centered = student_app - student_app.mean()
         student_corr = (sem_centered * app_centered).mean() / (sem_centered.square().mean().sqrt() * app_centered.square().mean().sqrt()).clamp_min(1e-6)
+        student_disagreement = strong_out.router.disagreement.detach().float()
+        teacher_disagreement = teacher_out.router.disagreement.detach().float()
+        student_high_disagreement = student_disagreement > 0.5
+        teacher_high_disagreement = teacher_disagreement > 0.5
+        student_w_geo = strong_out.router.w_geo.detach().float()
+        teacher_w_geo = teacher_out.router.w_geo.detach().float()
         metrics = {
             "dhga_debug_loss_requires_grad": float(loss.requires_grad),
             "dhga_debug_semantic_prob_requires_grad": float(strong_out.semantic_prob.requires_grad),
@@ -689,9 +718,15 @@ class DHGAStageTrainer:
             "dhga_student_sem_fg_prob": float(student_sem.mean().cpu()),
             "dhga_student_app_fg_prob": float(student_app.mean().cpu()),
             "dhga_student_expert_corr": float(student_corr.cpu()),
+            "dhga_student_w_geo_mean": float(student_w_geo.mean().cpu()),
+            "dhga_student_w_geo_disagreement_mean": float((student_w_geo * student_disagreement).sum().cpu() / student_disagreement.sum().clamp_min(1e-6).cpu()),
+            "dhga_student_w_geo_high_disagreement_mean": float(student_w_geo[student_high_disagreement].mean().cpu()) if bool(student_high_disagreement.any().cpu()) else 0.0,
             "dhga_teacher_disagreement_ratio": float((teacher_out.router.disagreement > 0.5).float().mean().detach().cpu()),
             "dhga_teacher_stable_fg_ratio": float((teacher_out.router.stable_foreground > 0.5).float().mean().detach().cpu()),
             "dhga_teacher_stable_bg_ratio": float((teacher_out.router.stable_background > 0.5).float().mean().detach().cpu()),
+            "dhga_teacher_w_geo_mean": float(teacher_w_geo.mean().cpu()),
+            "dhga_teacher_w_geo_disagreement_mean": float((teacher_w_geo * teacher_disagreement).sum().cpu() / teacher_disagreement.sum().clamp_min(1e-6).cpu()),
+            "dhga_teacher_w_geo_high_disagreement_mean": float(teacher_w_geo[teacher_high_disagreement].mean().cpu()) if bool(teacher_high_disagreement.any().cpu()) else 0.0,
             "dhga_teacher_cross_supervision_weight": float(teacher_out.router.cross_supervision_weight.detach().mean().cpu()),
             "dhga_router_supervision_weight": float(self._router_supervision_weight(teacher_out, 0.05).detach().mean().cpu()),
         }

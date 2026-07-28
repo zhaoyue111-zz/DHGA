@@ -81,13 +81,16 @@ class DHGAEvaluator:
                 raw_base = path.name.replace(".nii.gz", "").replace(".nii", "") + "_raw_disagreement"
                 np.save(self.save_dir / f"{raw_base}.npy", raw_disagreement.astype(np.float32, copy=False))
                 write_float_volume_like_reader(raw_disagreement.astype(np.float32, copy=False), str(self.save_dir / f"{raw_base}.nii.gz"), image_props)
-        metrics = {
-            "rows": rows,
-            "mean_dice": float(np.mean([r["dice"] for r in rows if "dice" in r])) if any("dice" in r for r in rows) else None,
-            "mean_iou": float(np.mean([r["iou"] for r in rows if "iou" in r])) if any("iou" in r for r in rows) else None,
-            "mean_precision": float(np.mean([r["precision"] for r in rows if "precision" in r])) if any("precision" in r for r in rows) else None,
-            "mean_recall": float(np.mean([r["recall"] for r in rows if "recall" in r])) if any("recall" in r for r in rows) else None,
-        }
+        metrics = {"rows": rows}
+        numeric_keys = sorted({
+            key
+            for row in rows
+            for key, value in row.items()
+            if isinstance(value, (int, float, np.integer, np.floating))
+        })
+        for key in numeric_keys:
+            values = [float(row[key]) for row in rows if key in row]
+            metrics[f"mean_{key}"] = float(np.mean(values)) if values else None
         (self.save_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
         return metrics
 
@@ -134,6 +137,8 @@ class DHGAEvaluator:
                 "disagreement_mean": float(router.disagreement.mean().cpu()),
                 "disagreement_voxel_rate": float((router.disagreement > 0.5).float().mean().cpu()),
                 "geometry_gate_mean": float(router.w_geo.mean().cpu()),
+                "geometry_gate_disagreement_mean": float((router.w_geo * router.disagreement).sum().cpu() / router.disagreement.sum().clamp_min(1e-6).cpu()),
+                "geometry_gate_high_disagreement_mean": float(router.w_geo[router.disagreement > 0.5].mean().cpu()) if bool((router.disagreement > 0.5).any().cpu()) else 0.0,
             }
             if self.config.dhga_geometry_enabled:
                 geometry = self.model.run_geometry(data_t,sem_prob,app_prob,router, self.model.text_embeddings, spacing, visual_feature=visual_feature,visual_feature_is_projected=True,)
@@ -208,19 +213,17 @@ def compute_binary_case_metrics(
 ) -> dict[str, float | int]:
     pred = pred.astype(bool)
     gt = gt.astype(bool)
-    dice, iou = foreground_dice_iou(pred, gt)
-    tp = int(np.logical_and(pred, gt).sum())
-    fp = int(np.logical_and(pred, ~gt).sum())
-    fn = int(np.logical_and(~pred, gt).sum())
+    base = _binary_metric_values(pred, gt)
     pred_voxels = int(pred.sum())
     gt_voxels = int(gt.sum())
     metrics: dict[str, float | int] = {
-        "dice": dice,
-        "iou": iou,
-        "precision": float(tp / max(tp + fp, 1)),
-        "recall": float(tp / max(tp + fn, 1)),
-        "fp_voxels": fp,
-        "fn_voxels": fn,
+        "dice": base["dice"],
+        "iou": base["iou"],
+        "precision": base["precision"],
+        "recall": base["recall"],
+        "fp_voxels": int(base["fp_voxels"]),
+        "fn_voxels": int(base["fn_voxels"]),
+        "fused_dice": base["dice"],
         "gt_voxels": gt_voxels,
         "pred_gt_volume_ratio": float(pred_voxels / max(gt_voxels, 1)),
         "connected_components": connected_components_3d(pred),
@@ -228,14 +231,41 @@ def compute_binary_case_metrics(
     if semantic_pred is not None and appearance_pred is not None:
         semantic_pred = semantic_pred.astype(bool)
         appearance_pred = appearance_pred.astype(bool)
+        sem = _binary_metric_values(semantic_pred, gt)
+        app = _binary_metric_values(appearance_pred, gt)
         oracle_union = np.logical_or(semantic_pred, appearance_pred)
         oracle_intersection = np.logical_and(semantic_pred, appearance_pred)
         union_dice, union_iou = foreground_dice_iou(oracle_union, gt)
         intersection_dice, intersection_iou = foreground_dice_iou(oracle_intersection, gt)
         metrics.update({
+            "semantic_dice": sem["dice"],
+            "semantic_iou": sem["iou"],
+            "semantic_precision": sem["precision"],
+            "semantic_recall": sem["recall"],
+            "appearance_dice": app["dice"],
+            "appearance_iou": app["iou"],
+            "appearance_precision": app["precision"],
+            "appearance_recall": app["recall"],
             "oracle_union_dice": union_dice,
             "oracle_union_iou": union_iou,
             "oracle_intersection_dice": intersection_dice,
             "oracle_intersection_iou": intersection_iou,
         })
     return metrics
+
+
+def _binary_metric_values(pred: np.ndarray, gt: np.ndarray) -> dict[str, float | int]:
+    pred = pred.astype(bool)
+    gt = gt.astype(bool)
+    dice, iou = foreground_dice_iou(pred, gt)
+    tp = int(np.logical_and(pred, gt).sum())
+    fp = int(np.logical_and(pred, ~gt).sum())
+    fn = int(np.logical_and(~pred, gt).sum())
+    return {
+        "dice": dice,
+        "iou": iou,
+        "precision": float(tp / max(tp + fp, 1)),
+        "recall": float(tp / max(tp + fn, 1)),
+        "fp_voxels": fp,
+        "fn_voxels": fn,
+    }
