@@ -76,6 +76,11 @@ class DHGAEvaluator:
             rows.append(row)
             out_name = path.name.replace(".nii.gz", "").replace(".nii", "") + "_dhga.nii.gz"
             self.reader.write_seg(pred.astype(np.uint8), str(self.save_dir / out_name), image_props)
+            raw_disagreement = getattr(self, "last_raw_disagreement", None)
+            if raw_disagreement is not None:
+                raw_base = path.name.replace(".nii.gz", "").replace(".nii", "") + "_raw_disagreement"
+                np.save(self.save_dir / f"{raw_base}.npy", raw_disagreement.astype(np.float32, copy=False))
+                write_float_volume_like_reader(raw_disagreement.astype(np.float32, copy=False), str(self.save_dir / f"{raw_base}.nii.gz"), image_props)
         metrics = {
             "rows": rows,
             "mean_dice": float(np.mean([r["dice"] for r in rows if "dice" in r])) if any("dice" in r for r in rows) else None,
@@ -146,6 +151,7 @@ class DHGAEvaluator:
         app_reverted = np.zeros((app_crop.shape[0], *orig_shape), dtype=np.float32)
         sem_reverted = self.insert_crop_into_image(sem_reverted, sem_crop, bbox)
         app_reverted = self.insert_crop_into_image(app_reverted, app_crop, bbox)
+        self.last_raw_disagreement = np.abs(sem_reverted[0].astype(np.float32) - app_reverted[0].astype(np.float32))
         self.last_semantic_pred = sem_reverted[0] >= self.config.pred_threshold
         self.last_appearance_pred = app_reverted[0] >= self.config.pred_threshold
         return reverted, props
@@ -176,6 +182,22 @@ def connected_components_3d(mask: np.ndarray) -> int:
                         visited[nz, ny, nx] = True
                         stack.append((nz, ny, nx))
         return count
+
+
+def write_float_volume_like_reader(volume: np.ndarray, output_fname: str, properties: dict) -> None:
+    import nibabel
+    from nibabel.orientations import axcodes2ornt, io_orientation, ornt_transform
+
+    volume = np.asarray(volume, dtype=np.float32)
+    if volume.ndim != 3:
+        raise ValueError("raw disagreement volume must have shape [D, H, W]")
+    restored = volume.transpose((2, 1, 0))
+    img = nibabel.Nifti1Image(restored, affine=properties["nibabel_stuff"]["reoriented_affine"])
+    img_ornt = io_orientation(properties["nibabel_stuff"]["original_affine"])
+    ras_ornt = axcodes2ornt("RAS")
+    from_canonical = ornt_transform(ras_ornt, img_ornt)
+    img_reoriented = img.as_reoriented(from_canonical)
+    nibabel.save(img_reoriented, output_fname)
 
 
 def compute_binary_case_metrics(

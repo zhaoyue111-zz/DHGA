@@ -22,7 +22,7 @@ from dhga.shared_voxtell import SharedEncoderOnce
 from dhga.trainer import DHGASmokeModel, run_synthetic_smoke
 from dhga.trainer import DHGAStageTrainer
 from dhga.teacher import EMATeacher
-from dhga.evaluation import compute_binary_case_metrics, connected_components_3d, spacing_from_reader_properties
+from dhga.evaluation import compute_binary_case_metrics, connected_components_3d, spacing_from_reader_properties, write_float_volume_like_reader
 from dhga.voxtell_model import PromptConditionedRayTokens
 
 
@@ -495,6 +495,18 @@ class DHGAStaticTests(unittest.TestCase):
             self.assertIn(key, metrics)
         self.assertEqual(metrics["fp_voxels"], 1)
         self.assertEqual(metrics["fn_voxels"], 0)
+
+    def test_raw_disagreement_is_absolute_probability_difference(self):
+        sem = torch.tensor([[[0.1, 0.9]]])
+        app = torch.tensor([[[0.4, 0.2]]])
+        raw = (sem.float() - app.float()).abs()
+        self.assertTrue(torch.allclose(raw, torch.tensor([[[0.3, 0.7]]])))
+
+    def test_float_volume_writer_rejects_non_3d(self):
+        import numpy as np
+
+        with self.assertRaises(ValueError):
+            write_float_volume_like_reader(np.zeros((1, 2, 3, 4), dtype=np.float32), "/tmp/unused.nii.gz", {})
 
     def test_synthetic_smoke(self):
         result = run_synthetic_smoke(DHGAConfig(), "cpu")
