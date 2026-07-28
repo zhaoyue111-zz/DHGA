@@ -371,30 +371,46 @@ class DHGAStaticTests(unittest.TestCase):
                 return SimpleNamespace(anchor_prob=prob)
 
         trainer = DHGAStageTrainer.__new__(DHGAStageTrainer)
-        trainer.config = DHGAConfig(steps_per_volume=3, dhga_stage_b_anchor_candidate_patches=4, dhga_stage_b_include_background_patch=True)
+        trainer.config = DHGAConfig(steps_per_volume=5, dhga_stage_b_anchor_candidate_patches=5, dhga_stage_b_include_background_patch=True)
         trainer.model = FakeAnchor()
         trainer.device = torch.device("cpu")
         trainer.stage_b_anchor_cache = {}
-        volume = torch.zeros(1, 4, 2, 2)
+        volume = torch.zeros(1, 5, 2, 2)
         volume[:, 0] = 0.95
-        volume[:, 1] = 0.50
-        volume[:, 2] = 0.05
-        volume[:, 3] = 0.0
+        volume[:, 1] = 0.90
+        volume[:, 2] = 0.50
+        volume[:, 3] = 0.05
+        volume[:, 4] = 0.0
         slicers = [
             (slice(None), slice(0, 1), slice(None), slice(None)),
             (slice(None), slice(1, 2), slice(None), slice(None)),
             (slice(None), slice(2, 3), slice(None), slice(None)),
             (slice(None), slice(3, 4), slice(None), slice(None)),
+            (slice(None), slice(4, 5), slice(None), slice(None)),
         ]
         random.seed(7)
         selected = trainer._stage_b_anchor_guided_slicers("case_a", volume, (1.0, 1.0, 1.0), slicers)
-        self.assertEqual([kind for _, kind in selected], ["foreground", "boundary", "background"])
-        self.assertEqual(trainer.model.calls, 4)
-        self.assertEqual(len(trainer.stage_b_anchor_cache["case_a"]), 4)
+        self.assertEqual([kind for _, kind in selected].count("foreground"), 3)
+        self.assertEqual([kind for _, kind in selected].count("boundary"), 1)
+        self.assertEqual([kind for _, kind in selected].count("background"), 1)
+        self.assertEqual(trainer.model.calls, 5)
+        self.assertEqual(len(trainer.stage_b_anchor_cache["case_a"]), 5)
         random.seed(11)
         cached = trainer._stage_b_anchor_guided_slicers("case_a", volume * 0, (1.0, 1.0, 1.0), list(reversed(slicers)))
-        self.assertEqual([kind for _, kind in cached], ["foreground", "boundary", "background"])
-        self.assertEqual(trainer.model.calls, 4)
+        self.assertEqual([kind for _, kind in cached].count("foreground"), 3)
+        self.assertEqual([kind for _, kind in cached].count("boundary"), 1)
+        self.assertEqual([kind for _, kind in cached].count("background"), 1)
+        self.assertEqual(trainer.model.calls, 5)
+
+    def test_stage_b_patch_kind_counts_follow_ratio_and_shortfall_priority(self):
+        trainer = DHGAStageTrainer.__new__(DHGAStageTrainer)
+        trainer.config = DHGAConfig(steps_per_volume=4, dhga_stage_b_include_background_patch=False)
+        self.assertEqual(trainer._stage_b_patch_kind_counts(4), {"foreground": 3, "boundary": 1, "background": 0})
+        self.assertEqual(trainer._stage_b_patch_kind_counts(3), {"foreground": 3, "boundary": 0, "background": 0})
+        trainer.config = DHGAConfig(steps_per_volume=5, dhga_stage_b_include_background_patch=True)
+        self.assertEqual(trainer._stage_b_patch_kind_counts(5), {"foreground": 3, "boundary": 1, "background": 1})
+        self.assertEqual(trainer._stage_b_patch_kind_counts(4), {"foreground": 2, "boundary": 1, "background": 1})
+        self.assertEqual(trainer._stage_b_patch_kind_counts(2), {"foreground": 1, "boundary": 1, "background": 0})
 
     def test_epoch_metrics_include_distribution_summary(self):
         trainer = DHGAStageTrainer.__new__(DHGAStageTrainer)

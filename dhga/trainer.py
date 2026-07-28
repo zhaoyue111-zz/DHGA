@@ -479,11 +479,47 @@ class DHGAStageTrainer:
         return ((x - lo) / (hi - lo).clamp_min(1e-6)).clamp(0, 1)
 
     def _stage_b_patches_per_case(self) -> int:
-        requested = self.config.steps_per_volume if self.config.steps_per_volume > 0 else 3
-        requested = max(2, min(3, int(requested)))
-        if not self.config.dhga_stage_b_include_background_patch:
-            requested = min(requested, 2)
-        return requested
+        if self.config.steps_per_volume > 0:
+            return max(1, int(self.config.steps_per_volume))
+        return 5 if self.config.dhga_stage_b_include_background_patch else 4
+
+    def _stage_b_patch_kind_counts(self, total: int) -> dict[str, int]:
+        total = max(0, int(total))
+        if total == 0:
+            return {"foreground": 0, "boundary": 0, "background": 0}
+        if self.config.dhga_stage_b_include_background_patch:
+            if total < 5:
+                counts = {"foreground": 0, "boundary": 0, "background": 0}
+                priority = ("foreground", "boundary", "background", "foreground")
+                for idx in range(total):
+                    counts[priority[idx]] += 1
+                return counts
+            counts = {
+                "foreground": (total * 3) // 5,
+                "boundary": total // 5,
+                "background": total // 5,
+            }
+            remainder = total - sum(counts.values())
+            for kind in ("foreground", "boundary", "background"):
+                if remainder <= 0:
+                    break
+                counts[kind] += 1
+                remainder -= 1
+            return counts
+        if total < 4:
+            return {"foreground": total, "boundary": 0, "background": 0}
+        counts = {
+            "foreground": (total * 3) // 4,
+            "boundary": total // 4,
+            "background": 0,
+        }
+        remainder = total - counts["foreground"] - counts["boundary"]
+        for kind in ("foreground", "boundary"):
+            if remainder <= 0:
+                break
+            counts[kind] += 1
+            remainder -= 1
+        return counts
 
     def _stage_b_anchor_guided_slicers(self, path: Path | str, volume, spacing: tuple[float, float, float], slicers: list) -> list[tuple[tuple, str]]:
         if not slicers:
@@ -516,6 +552,7 @@ class DHGAStageTrainer:
         scored = self.stage_b_anchor_cache[cache_key]
         selected: list[tuple[tuple, str]] = []
         used: set[int] = set()
+        target_counts = self._stage_b_patch_kind_counts(self._stage_b_patches_per_case())
 
         def add_random_from_top(score_key: str, kind: str, body_min: float = 0.0) -> None:
             ranked = [
@@ -543,9 +580,11 @@ class DHGAStageTrainer:
                     used.add(idx)
                     return
 
-        add_random_from_top("fg", "foreground")
-        add_random_from_top("boundary", "boundary")
-        if self._stage_b_patches_per_case() >= 3 and self.config.dhga_stage_b_include_background_patch:
+        for _ in range(target_counts["foreground"]):
+            add_random_from_top("fg", "foreground")
+        for _ in range(target_counts["boundary"]):
+            add_random_from_top("boundary", "boundary")
+        for _ in range(target_counts["background"]):
             add_random_from_top("bg", "background", body_min=0.02)
         while len(selected) < self._stage_b_patches_per_case():
             before = len(selected)
