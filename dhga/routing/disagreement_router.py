@@ -20,13 +20,58 @@ class RouterOutput:
     w_geo: Tensor
 
 
-def _case_rank_normalize(x: Tensor) -> Tensor:
-    flat = x.flatten(2)
-    lo = flat.quantile(0.05, dim=-1, keepdim=True)
-    hi = flat.quantile(0.95, dim=-1, keepdim=True)
-    y = (flat - lo) / (hi - lo).clamp_min(1e-6)
-    return y.clamp(0, 1).view_as(x)
+# def _case_rank_normalize(x: Tensor) -> Tensor:
+#     flat = x.flatten(2)
+#     lo = flat.quantile(0.05, dim=-1, keepdim=True)
+#     hi = flat.quantile(0.95, dim=-1, keepdim=True)
+#     y = (flat - lo) / (hi - lo).clamp_min(1e-6)
+#     return y.clamp(0, 1).view_as(x)
 
+# 262,144 个采样点足以稳定估计病例内分位数，
+# 同时避免 torch.quantile 处理超大完整体积。
+_MAX_QUANTILE_SAMPLES = 262_144
+
+
+def _sampled_case_quantile(
+    x: Tensor,
+    q: float,
+    max_samples: int = _MAX_QUANTILE_SAMPLES,
+) -> Tensor:
+    """Estimate a per-case, per-channel quantile with bounded memory.
+
+    Returns shape [B, C, 1]. Sampling is deterministic so evaluation and
+    checkpoint resume remain reproducible.
+    """
+    if not 0.0 <= q <= 1.0:
+        raise ValueError(f"q must be in [0, 1], got {q}")
+    if max_samples < 2:
+        raise ValueError( f"max_samples must be at least 2, got {max_samples}")
+
+    flat = x.flatten(2).float()
+    num_voxels = flat.shape[-1]
+
+    if num_voxels == 0:
+        raise ValueError("Cannot calculate a quantile of an empty tensor")
+
+    if num_voxels > max_samples:
+        # 均匀覆盖整个扁平体积；不使用随机采样，保证结果可复现。
+        indices = torch.linspace(0,num_voxels - 1, steps=max_samples,device=flat.device,).round().long()
+        sampled = flat.index_select(-1, indices)
+    else:
+        sampled = flat
+
+    return torch.quantile(sampled, q,dim=-1,keepdim=True,)
+
+
+def _case_rank_normalize(x: Tensor) -> Tensor:
+    flat = x.flatten(2).float()
+
+    lo = _sampled_case_quantile(x, 0.05)
+    hi = _sampled_case_quantile(x, 0.95)
+
+    normalized = (flat - lo) / (hi - lo).clamp_min(1e-6)
+
+    return (normalized.clamp(0.0, 1.0).view_as(x).to(dtype=x.dtype))
 
 class DisagreementRouter(nn.Module):
     """Continuous router that preserves high-disagreement voxels for geometry."""
@@ -97,9 +142,14 @@ class DisagreementRouter(nn.Module):
         region_w_sem = w_sem / region_denom
         region_w_app = w_app / region_denom
         fused = region_w_sem * sem_prob + region_w_app * app_prob
-        consensus_mask = (stable_foreground > stable_background) & (
-            disagreement_weight < disagreement_weight.flatten(2).quantile(self.disagreement_quantile, dim=-1, keepdim=True).view(*disagreement_weight.shape[:2], 1, 1, 1)
-        )
+        # consensus_mask = (stable_foreground > stable_background) & (
+        #     disagreement_weight < disagreement_weight.flatten(2).quantile(self.disagreement_quantile, dim=-1, keepdim=True).view(*disagreement_weight.shape[:2], 1, 1, 1)
+        # )
+
+        disagreement_threshold = _sampled_case_quantile(disagreement_weight,self.disagreement_quantile,).view(
+            disagreement_weight.shape[0],disagreement_weight.shape[1], 1,1,1,).to(dtype=disagreement_weight.dtype)
+        consensus_mask = (stable_foreground > stable_background) & (disagreement_weight < disagreement_threshold)
+
         low_disagreement_gate = (0.5 - disagreement_weight).clamp_min(0.0) * 2.0
         consensus_weight = (stable_foreground + stable_background).clamp(0, 1) * low_disagreement_gate
         geometry_weight = (w_geo * disagreement_weight).clamp(0, 1)

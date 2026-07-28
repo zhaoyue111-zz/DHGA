@@ -7,7 +7,7 @@ from torch import Tensor, nn
 
 class GeometryTransportHead(nn.Module):
     """Light ray-token head initialized to prefer zero displacement."""
-
+    """对每一条射线 token，输出各个偏移位置的分类概率分布，算出期望位移（毫米）"""
     def __init__(self, in_channels: int, offsets_mm: Tensor, hidden_channels: int = 32) -> None:
         super().__init__()
         self.register_buffer("offsets_mm", offsets_mm.float())
@@ -24,7 +24,7 @@ class GeometryTransportHead(nn.Module):
         self.center_index = center
         self.center_bias = nn.Parameter(torch.tensor(12.0))
         step = torch.diff(self.offsets_mm).abs().min().clamp_min(1e-6) if self.offsets_mm.numel() > 1 else torch.tensor(1.0)
-        prior = -8.0 * self.offsets_mm.abs() / step
+        prior = -8.0 * self.offsets_mm.abs() / step # # 距离0越远，先验分值越低
         prior[center] = 0.0
         self.register_buffer("zero_displacement_prior", prior.float())
 
