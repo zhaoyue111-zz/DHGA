@@ -141,15 +141,25 @@ class DHGAEvaluator:
             sem_only = sem_mask & ~app_mask
             app_only = app_mask & ~sem_mask
             union = sem_mask | app_mask
+            disagreement_region = router.disagreement > 0.5
             self.last_case_diagnostics = {
                 "semantic_appearance_complement_rate": float((sem_only | app_only).float().sum().cpu() / union.float().sum().clamp_min(1.0).cpu()),
                 "semantic_only_voxels": int(sem_only.sum().cpu()),
                 "appearance_only_voxels": int(app_only.sum().cpu()),
                 "disagreement_mean": float(router.disagreement.mean().cpu()),
                 "disagreement_voxel_rate": float((router.disagreement > 0.5).float().mean().cpu()),
+                "mean_w_sem": float(router.w_sem.mean().cpu()),
+                "mean_w_app": float(router.w_app.mean().cpu()),
+                "mean_w_geo": float(router.w_geo.mean().cpu()),
+                "foreground_region_w_sem": _masked_tensor_mean(router.w_sem, union),
+                "foreground_region_w_app": _masked_tensor_mean(router.w_app, union),
+                "foreground_region_w_geo": _masked_tensor_mean(router.w_geo, union),
+                "disagreement_region_w_sem": _masked_tensor_mean(router.w_sem, disagreement_region),
+                "disagreement_region_w_app": _masked_tensor_mean(router.w_app, disagreement_region),
+                "disagreement_region_w_geo": _masked_tensor_mean(router.w_geo, disagreement_region),
                 "geometry_gate_mean": float(router.w_geo.mean().cpu()),
                 "geometry_gate_disagreement_mean": float((router.w_geo * router.disagreement).sum().cpu() / router.disagreement.sum().clamp_min(1e-6).cpu()),
-                "geometry_gate_high_disagreement_mean": float(router.w_geo[router.disagreement > 0.5].mean().cpu()) if bool((router.disagreement > 0.5).any().cpu()) else 0.0,
+                "geometry_gate_high_disagreement_mean": _masked_tensor_mean(router.w_geo, disagreement_region),
             }
             if self.config.dhga_geometry_enabled:
                 geometry = self.model.run_geometry(data_t,sem_prob,app_prob,router, self.model.text_embeddings, spacing, visual_feature=visual_feature,visual_feature_is_projected=True,)
@@ -198,6 +208,15 @@ def connected_components_3d(mask: np.ndarray) -> int:
                         visited[nz, ny, nx] = True
                         stack.append((nz, ny, nx))
         return count
+
+
+def _masked_tensor_mean(values: torch.Tensor, mask: torch.Tensor) -> float:
+    mask = mask.to(device=values.device, dtype=torch.bool)
+    if mask.shape != values.shape:
+        mask = mask.expand_as(values)
+    if not bool(mask.any().detach().cpu()):
+        return 0.0
+    return float(values[mask].detach().float().mean().cpu())
 
 
 def write_float_volume_like_reader(volume: np.ndarray, output_fname: str, properties: dict) -> None:

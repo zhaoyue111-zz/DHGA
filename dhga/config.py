@@ -49,6 +49,7 @@ class DHGAConfig:
     dhga_cross_supervision_weight: float = 1.0
     dhga_cross_supervision_min_weight: float = 0.05
     dhga_weak_strong_weight: float = 0.5
+    dhga_router_target_weight: float = 0.5
     dhga_router_normalization: str = "case_rank"
     dhga_geometry_enabled: bool = True
     dhga_search_radius_mm: float = 6.0
@@ -103,6 +104,8 @@ class DHGAConfig:
             raise ValueError("dhga_cross_supervision_weight must be non-negative")
         if not 0.0 <= self.dhga_cross_supervision_min_weight <= 1.0:
             raise ValueError("dhga_cross_supervision_min_weight must be in [0, 1]")
+        if self.dhga_router_target_weight < 0:
+            raise ValueError("dhga_router_target_weight must be non-negative")
         if self.dhga_router_normalization not in {"case_rank", "none"}:
             raise ValueError("dhga_router_normalization must be case_rank or none")
         if self.dhga_search_radius_mm <= 0 or self.dhga_ray_step_mm <= 0:

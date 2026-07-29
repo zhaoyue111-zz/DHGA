@@ -747,7 +747,7 @@ class DHGAStageTrainer:
             + self.config.dhga_appearance_expansion_weight * appearance_expansion
             + self.config.dhga_weak_strong_weight * weak_strong
             + self.config.dhga_cross_supervision_weight * cross
-            + 0.1 * router_loss
+            + self.config.dhga_router_target_weight * router_loss
         )
         student_sem = strong_out.semantic_prob.detach().float()
         student_app = strong_out.appearance_prob.detach().float()
@@ -782,6 +782,7 @@ class DHGAStageTrainer:
             "dhga_cross_supervision_effective_weight": float(cross_weight.detach().mean().cpu()),
             "dhga_cross_supervision_min_effective_weight": float(cross_weight.detach().min().cpu()),
             "dhga_router_supervision_weight": float(self._router_supervision_weight(teacher_out, 0.05).detach().mean().cpu()),
+            "dhga_router_target_weight": float(self.config.dhga_router_target_weight),
         }
         metrics.update({
             "loss": float(loss.detach().cpu()),
@@ -942,25 +943,35 @@ class DHGAStageTrainer:
         return out.semantic_prob.new_zeros(())
 
     def _router_supervision_weight(self, teacher_out, min_weight: float = 0.0) -> Tensor:
-        weight = (
-            teacher_out.router.stable_foreground
-            + teacher_out.router.stable_background
-            + teacher_out.router.disagreement
+        foreground = torch.maximum(
+            teacher_out.anchor_prob.detach(),
+            torch.maximum(teacher_out.semantic_prob.detach(), teacher_out.appearance_prob.detach()),
         )
+        foreground = torch.maximum(foreground, teacher_out.router.stable_foreground.detach()).clamp(0, 1)
+        disagreement = teacher_out.router.disagreement.detach().clamp(0, 1)
+        high_disagreement = disagreement.square()
+        weight = (0.5 * foreground + 0.5 * disagreement + high_disagreement).clamp(0, 1)
         return weight.detach().clamp(0, 1).clamp_min(float(min_weight))
 
     def _router_target_loss(self, student_out, teacher_out, min_weight: float = 0.0) -> Tensor:
         with torch.no_grad():
-            teacher_disagreement = (teacher_out.semantic_prob - teacher_out.appearance_prob).abs()
-            sem_reliability = 1.0 - (teacher_out.semantic_prob - teacher_out.anchor_prob).abs()
-            app_reliability = 1.0 - (teacher_out.appearance_prob - teacher_out.anchor_prob).abs()
-            geo_reliability = teacher_disagreement
-            target = torch.cat([sem_reliability, app_reliability, geo_reliability], dim=1).clamp_min(0.0)
-            target = target / target.sum(dim=1, keepdim=True).clamp_min(1e-6)
+            target = self._router_reliability_target(teacher_out)
             weight = self._router_supervision_weight(teacher_out, min_weight)
         pred = torch.cat([student_out.router.w_sem, student_out.router.w_app, student_out.router.w_geo], dim=1)
         loss = (pred - target.detach()).square().sum(dim=1, keepdim=True)
         return (loss * weight).sum() / weight.sum().clamp_min(1.0)
+
+    def _router_reliability_target(self, teacher_out) -> Tensor:
+        teacher_disagreement = (teacher_out.semantic_prob - teacher_out.appearance_prob).abs()
+        sem_reliability = 1.0 - (teacher_out.semantic_prob - teacher_out.anchor_prob).abs()
+        app_reliability = 1.0 - (teacher_out.appearance_prob - teacher_out.anchor_prob).abs()
+        normalized_disagreement = torch.maximum(
+            teacher_disagreement.clamp(0, 1),
+            teacher_out.router.disagreement.detach().clamp(0, 1),
+        )
+        geo_reliability = normalized_disagreement.square()
+        target = torch.cat([sem_reliability, app_reliability, geo_reliability], dim=1).clamp_min(0.0)
+        return target / target.sum(dim=1, keepdim=True).clamp_min(1e-6)
 
     def _stage_d_router_target_loss(self, student_out, teacher_out) -> Tensor:
         return self._router_target_loss(student_out, teacher_out, min_weight=0.0)

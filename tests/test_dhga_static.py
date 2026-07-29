@@ -336,6 +336,50 @@ class DHGAStaticTests(unittest.TestCase):
         self.assertGreater(float(loss.detach()), 0.0)
         self.assertTrue(any(grad is not None and bool((grad.abs() > 0).any()) for grad in grads))
 
+    def test_router_target_weight_default_is_configurable(self):
+        self.assertAlmostEqual(DHGAConfig().dhga_router_target_weight, 0.5)
+        self.assertAlmostEqual(DHGAConfig(dhga_router_target_weight=0.25).dhga_router_target_weight, 0.25)
+        with self.assertRaises(ValueError):
+            DHGAConfig(dhga_router_target_weight=-0.1)
+
+    def test_router_supervision_weight_prioritizes_foreground_and_disagreement(self):
+        router = DisagreementRouter("none")
+        sem = torch.zeros(1, 1, 1, 1, 4)
+        app = torch.zeros_like(sem)
+        anchor = torch.zeros_like(sem)
+        sem[..., 1] = 0.8
+        app[..., 1] = 0.8
+        anchor[..., 1] = 0.8
+        sem[..., 2] = 0.9
+        app[..., 2] = 0.1
+        anchor[..., 2] = 0.5
+        teacher = SimpleNamespace(
+            semantic_prob=sem,
+            appearance_prob=app,
+            anchor_prob=anchor,
+            router=router(sem, app),
+        )
+        trainer = DHGAStageTrainer.__new__(DHGAStageTrainer)
+        weight = trainer._router_supervision_weight(teacher, min_weight=0.0)
+        self.assertGreater(float(weight[..., 1]), float(weight[..., 0]))
+        self.assertGreater(float(weight[..., 2]), float(weight[..., 0]))
+
+    def test_router_reliability_target_emphasizes_high_disagreement_geometry(self):
+        router = DisagreementRouter("none")
+        sem = torch.tensor([[[[[0.5, 0.9]]]]])
+        app = torch.tensor([[[[[0.5, 0.1]]]]])
+        anchor = torch.tensor([[[[[0.5, 0.5]]]]])
+        teacher = SimpleNamespace(
+            semantic_prob=sem,
+            appearance_prob=app,
+            anchor_prob=anchor,
+            router=router(sem, app),
+        )
+        trainer = DHGAStageTrainer.__new__(DHGAStageTrainer)
+        target = trainer._router_reliability_target(teacher)
+        geo_target = target[:, 2:3]
+        self.assertGreater(float(geo_target[..., 1]), float(geo_target[..., 0]))
+
     def test_stage_a_uses_baseline_forward(self):
         class FakeBaseline(torch.nn.Module):
             def __init__(self):

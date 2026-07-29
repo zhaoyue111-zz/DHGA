@@ -79,6 +79,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dhga_cross_supervision_weight", type=float, default=1.0)
     parser.add_argument("--dhga_cross_supervision_min_weight", type=float, default=0.05)
     parser.add_argument("--dhga_weak_strong_weight", type=float, default=0.5)
+    parser.add_argument("--dhga_router_target_weight", type=float, default=0.5)
     parser.add_argument("--dhga_router_normalization", choices=("case_rank", "none"), default="case_rank")
     parser.add_argument("--dhga_geometry_enabled", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--dhga_search_radius_mm", type=float, default=6.0)
@@ -171,6 +172,7 @@ def config_from_args(args: argparse.Namespace) -> DHGAConfig:
         dhga_cross_supervision_weight=args.dhga_cross_supervision_weight,
         dhga_cross_supervision_min_weight=args.dhga_cross_supervision_min_weight,
         dhga_weak_strong_weight=args.dhga_weak_strong_weight,
+        dhga_router_target_weight=args.dhga_router_target_weight,
         dhga_router_normalization=args.dhga_router_normalization,
         dhga_geometry_enabled=args.dhga_geometry_enabled,
         dhga_search_radius_mm=args.dhga_search_radius_mm,
