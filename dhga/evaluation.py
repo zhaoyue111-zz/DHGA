@@ -10,7 +10,7 @@ from tqdm import tqdm
 
 from dhga.config import DHGAConfig
 from dhga.geometry import mask_to_sdf
-from dhga.inference import finalize_probability
+from dhga.inference import finalize_probability, geometry_effective_gate
 from dhga.voxtell_model import build_dhga_voxtell_model
 from voxtell_sfda.adapter import foreground_dice_iou, load_split_manifest, match_label_path
 
@@ -72,7 +72,9 @@ class DHGAEvaluator:
                 gt = label == int(self.label_values[0])
                 sem_pred = getattr(self, "last_semantic_pred", pred)
                 app_pred = getattr(self, "last_appearance_pred", pred)
+                fused_pred = getattr(self, "last_fused_pred", pred)
                 row.update(compute_binary_case_metrics(pred, gt, sem_pred, app_pred))
+                row.update(compute_geometry_case_metrics(fused_pred, pred, gt, spacing_from_reader_properties(image_props), self.config.dhga_surface_tolerance_mm))
                 raw_disagreement = getattr(self, "last_raw_disagreement", None)
                 if raw_disagreement is not None:
                     row.update(
@@ -161,25 +163,50 @@ class DHGAEvaluator:
                 "geometry_gate_disagreement_mean": float((router.w_geo * router.disagreement).sum().cpu() / router.disagreement.sum().clamp_min(1e-6).cpu()),
                 "geometry_gate_high_disagreement_mean": _masked_tensor_mean(router.w_geo, disagreement_region),
             }
+            geometry_stats = {}
             if self.config.dhga_geometry_enabled:
                 geometry = self.model.run_geometry(data_t,sem_prob,app_prob,router, self.model.text_embeddings, spacing, visual_feature=visual_feature,visual_feature_is_projected=True,)
                 phi = mask_to_sdf(router.fused_prob >= self.config.pred_threshold, spacing)
-                final = finalize_probability(router.fused_prob,phi,geometry["dense_displacement_mm"],router.w_geo,self.config,geometry.get("dense_valid_weight"),)
+                effective_gate = geometry.get("effective_gate")
+                if effective_gate is None:
+                    effective_gate = geometry_effective_gate(
+                        router.w_geo,
+                        (sem_prob - app_prob).abs().clamp(0, 1),
+                        phi,
+                        self.config,
+                        geometry.get("dense_valid_weight"),
+                        geometry["dense_displacement_mm"],
+                    )
+                final = finalize_probability(
+                    router.fused_prob,
+                    phi,
+                    geometry["dense_displacement_mm"],
+                    router.w_geo,
+                    self.config,
+                    geometry.get("dense_valid_weight"),
+                    expert_disagreement=(sem_prob - app_prob).abs().clamp(0, 1),
+                )
+                geometry_stats = summarize_geometry_tensors(geometry["dense_displacement_mm"], effective_gate, router.fused_prob, final, self.config.pred_threshold)
             else:
                 geometry = None
                 final=router.fused_prob
         final = final[(slice(None), slice(None), *slicer_revert_padding[1:])].cpu().numpy()[0]
+        fused_crop = router.fused_prob[(slice(None), slice(None), *slicer_revert_padding[1:])].cpu().numpy()[0]
         sem_crop = sem_prob[(slice(None), slice(None), *slicer_revert_padding[1:])].cpu().numpy()[0]
         app_crop = app_prob[(slice(None), slice(None), *slicer_revert_padding[1:])].cpu().numpy()[0]
         reverted = np.zeros((final.shape[0], *orig_shape), dtype=np.float32)
         reverted = self.insert_crop_into_image(reverted, final, bbox)
+        fused_reverted = np.zeros((fused_crop.shape[0], *orig_shape), dtype=np.float32)
         sem_reverted = np.zeros((sem_crop.shape[0], *orig_shape), dtype=np.float32)
         app_reverted = np.zeros((app_crop.shape[0], *orig_shape), dtype=np.float32)
+        fused_reverted = self.insert_crop_into_image(fused_reverted, fused_crop, bbox)
         sem_reverted = self.insert_crop_into_image(sem_reverted, sem_crop, bbox)
         app_reverted = self.insert_crop_into_image(app_reverted, app_crop, bbox)
         self.last_raw_disagreement = np.abs(sem_reverted[0].astype(np.float32) - app_reverted[0].astype(np.float32))
+        self.last_fused_pred = fused_reverted[0] >= self.config.pred_threshold
         self.last_semantic_pred = sem_reverted[0] >= self.config.pred_threshold
         self.last_appearance_pred = app_reverted[0] >= self.config.pred_threshold
+        self.last_case_diagnostics.update(geometry_stats)
         return reverted, props
 
 
@@ -251,6 +278,7 @@ def compute_binary_case_metrics(
         "iou": base["iou"],
         "precision": base["precision"],
         "recall": base["recall"],
+        "tp_voxels": int(base["tp_voxels"]),
         "fp_voxels": int(base["fp_voxels"]),
         "fn_voxels": int(base["fn_voxels"]),
         "fused_dice": base["dice"],
@@ -312,6 +340,117 @@ def compute_raw_disagreement_metrics(
             metrics[f"raw_disagreement_gt_boundary_gt_{threshold:.1f}_rate"] = float((raw[boundary] > threshold).mean()) if boundary.any() else 0.0
         metrics["raw_disagreement_gt_boundary_voxel_rate"] = float(boundary.mean()) if boundary.size else 0.0
     return metrics
+
+
+def summarize_geometry_tensors(displacement_mm: torch.Tensor, effective_gate: torch.Tensor, fused_prob: torch.Tensor, final_prob: torch.Tensor, threshold: float = 0.5) -> dict[str, float | int]:
+    disp = displacement_mm.detach().float()
+    gate = effective_gate.detach().float()
+    modified = (final_prob.detach() >= float(threshold)) != (fused_prob.detach() >= float(threshold))
+    active = gate > 0
+    if bool(active.any().cpu()):
+        active_disp = disp[active]
+        disp_mean = float(active_disp.mean().cpu())
+        disp_abs_mean = float(active_disp.abs().mean().cpu())
+        disp_abs_max = float(active_disp.abs().max().cpu())
+    else:
+        disp_mean = 0.0
+        disp_abs_mean = 0.0
+        disp_abs_max = 0.0
+    return {
+        "geometry_effective_gate_mean": float(gate.mean().cpu()),
+        "geometry_effective_gate_max": float(gate.max().cpu()) if gate.numel() else 0.0,
+        "geometry_active_gate_voxel_ratio": float(active.float().mean().cpu()) if gate.numel() else 0.0,
+        "geometry_displacement_active_mean_mm": disp_mean,
+        "geometry_abs_displacement_active_mean_mm": disp_abs_mean,
+        "geometry_abs_displacement_max_mm": disp_abs_max,
+        "geometry_modified_voxel_ratio": float(modified.float().mean().cpu()) if modified.numel() else 0.0,
+        "geometry_modified_voxels": int(modified.sum().cpu()),
+    }
+
+
+def compute_geometry_case_metrics(
+    fused_pred: np.ndarray,
+    final_pred: np.ndarray,
+    gt: np.ndarray,
+    spacing: tuple[float, float, float],
+    surface_tolerance_mm: float,
+) -> dict[str, float | int]:
+    fused = np.asarray(fused_pred, dtype=bool)
+    final = np.asarray(final_pred, dtype=bool)
+    gt = np.asarray(gt, dtype=bool)
+    fused_base = _binary_metric_values(fused, gt)
+    final_base = _binary_metric_values(final, gt)
+    fused_surface = surface_distance_metrics(fused, gt, spacing, surface_tolerance_mm)
+    final_surface = surface_distance_metrics(final, gt, spacing, surface_tolerance_mm)
+    modified = fused ^ final
+    return {
+        "fused_before_geometry_dice": fused_base["dice"],
+        "geometry_after_dice": final_base["dice"],
+        "geometry_delta_dice": float(final_base["dice"] - fused_base["dice"]),
+        "fused_before_geometry_surface_dice": fused_surface["surface_dice"],
+        "geometry_after_surface_dice": final_surface["surface_dice"],
+        "geometry_delta_surface_dice": float(final_surface["surface_dice"] - fused_surface["surface_dice"]),
+        "fused_before_geometry_hd95": fused_surface["hd95"],
+        "geometry_after_hd95": final_surface["hd95"],
+        "fused_before_geometry_assd": fused_surface["assd"],
+        "geometry_after_assd": final_surface["assd"],
+        "geometry_modified_voxel_ratio_case": float(modified.mean()) if modified.size else 0.0,
+        "geometry_tp_delta": int(final_base["tp_voxels"] - fused_base["tp_voxels"]),
+        "geometry_fn_delta": int(final_base["fn_voxels"] - fused_base["fn_voxels"]),
+        "geometry_fp_delta": int(final_base["fp_voxels"] - fused_base["fp_voxels"]),
+    }
+
+
+def surface_distance_metrics(pred: np.ndarray, gt: np.ndarray, spacing: tuple[float, float, float], tolerance_mm: float) -> dict[str, float]:
+    pred = np.asarray(pred, dtype=bool)
+    gt = np.asarray(gt, dtype=bool)
+    if not pred.any() and not gt.any():
+        return {"surface_dice": 1.0, "hd95": 0.0, "assd": 0.0}
+    if not pred.any() or not gt.any():
+        return {"surface_dice": 0.0, "hd95": float("inf"), "assd": float("inf")}
+    pred_surface = _surface_voxels(pred)
+    gt_surface = _surface_voxels(gt)
+    if not pred_surface.any() or not gt_surface.any():
+        return {"surface_dice": 0.0, "hd95": float("inf"), "assd": float("inf")}
+    try:
+        from scipy import ndimage
+
+        dist_to_gt = ndimage.distance_transform_edt(~gt_surface, sampling=spacing)
+        dist_to_pred = ndimage.distance_transform_edt(~pred_surface, sampling=spacing)
+        pred_to_gt = dist_to_gt[pred_surface]
+        gt_to_pred = dist_to_pred[gt_surface]
+    except Exception:
+        pred_to_gt = _surface_distances_numpy(pred_surface, gt_surface, spacing)
+        gt_to_pred = _surface_distances_numpy(gt_surface, pred_surface, spacing)
+    combined = np.concatenate([pred_to_gt, gt_to_pred]).astype(np.float64)
+    if combined.size == 0:
+        return {"surface_dice": 0.0, "hd95": float("inf"), "assd": float("inf")}
+    within = (pred_to_gt <= tolerance_mm).sum() + (gt_to_pred <= tolerance_mm).sum()
+    denom = max(pred_to_gt.size + gt_to_pred.size, 1)
+    return {
+        "surface_dice": float(within / denom),
+        "hd95": float(np.percentile(combined, 95)),
+        "assd": float(combined.mean()),
+    }
+
+
+def _surface_voxels(mask: np.ndarray) -> np.ndarray:
+    if not mask.any():
+        return np.zeros_like(mask, dtype=bool)
+    return np.logical_and(mask, ~_binary_erode6(mask))
+
+
+def _surface_distances_numpy(src_surface: np.ndarray, dst_surface: np.ndarray, spacing: tuple[float, float, float]) -> np.ndarray:
+    src = np.argwhere(src_surface).astype(np.float64)
+    dst = np.argwhere(dst_surface).astype(np.float64)
+    if src.size == 0 or dst.size == 0:
+        return np.asarray([], dtype=np.float64)
+    spacing_arr = np.asarray(spacing, dtype=np.float64)
+    out = []
+    for point in src:
+        dist = np.sqrt((((dst - point) * spacing_arr) ** 2).sum(axis=1))
+        out.append(float(dist.min()))
+    return np.asarray(out, dtype=np.float64)
 
 
 def _raw_disagreement_summary(values: np.ndarray, prefix: str) -> dict[str, float]:
@@ -380,6 +519,7 @@ def _binary_metric_values(pred: np.ndarray, gt: np.ndarray) -> dict[str, float |
     return {
         "dice": dice,
         "iou": iou,
+        "tp_voxels": tp,
         "precision": float(tp / max(tp + fp, 1)),
         "recall": float(tp / max(tp + fn, 1)),
         "fp_voxels": fp,

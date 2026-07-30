@@ -12,7 +12,7 @@ from torch import Tensor, nn
 from torch.utils.checkpoint import checkpoint
 
 from dhga.config import DHGAConfig
-from dhga.inference import finalize_probability
+from dhga.inference import finalize_probability, geometry_effective_gate
 from dhga.experts import AppearanceExpert
 from dhga.geometry import (
     GeometryTransportHead,
@@ -212,6 +212,7 @@ class DHGAVoxTellModel(nn.Module):
                 router.w_geo,
                 self.config,
                 geometry.get("dense_valid_weight"),
+                expert_disagreement=(sem_prob - app_prob).abs().clamp(0, 1),
             )
         return DHGAForwardOutput(
             semantic_logits=semantic_logits,
@@ -351,15 +352,25 @@ class DHGAVoxTellModel(nn.Module):
             prompt_embedding,
         )
         pred = self._geometry_forward_chunked(tokens, valid)
+        sparse_displacement = pred["expected_displacement_mm"].clamp(
+            -float(self.config.dhga_geometry_max_displacement_mm),
+            float(self.config.dhga_geometry_max_displacement_mm),
+        )
         dense, dense_weight = sparse_displacements_to_dense_narrowband(
             points,
-            pred["expected_displacement_mm"] * self._sample_point_weight(router.geometry_disagreement_weight, points),
+            sparse_displacement * self._sample_point_weight(router.geometry_disagreement_weight, points),
             valid_points,
             tuple(image.shape[-3:]),
             spacing=spacing,
             diffusion_mm=self.config.dhga_displacement_diffusion_mm,
             return_weight=True,
         )
+        dense = dense.clamp(
+            -float(self.config.dhga_geometry_max_displacement_mm),
+            float(self.config.dhga_geometry_max_displacement_mm),
+        )
+        expert_disagreement = (sem_prob - app_prob).abs().clamp(0, 1)
+        effective_gate = geometry_effective_gate(router.w_geo, expert_disagreement, sdf, self.config, dense_weight, dense)
         return {
             "sdf": sdf,
             "boundary_points_zyx": points,
@@ -367,9 +378,11 @@ class DHGAVoxTellModel(nn.Module):
             "valid_boundary_points": valid_points,
             "ray_valid_mask": valid,
             "ray_tokens": tokens,
-            "sparse_displacement_mm": pred["expected_displacement_mm"],
+            "sparse_displacement_mm": sparse_displacement,
             "dense_displacement_mm": dense,
             "dense_valid_weight": dense_weight,
+            "effective_gate": effective_gate,
+            "expert_disagreement": expert_disagreement,
             "displacement_entropy": pred["entropy"],
         }
 

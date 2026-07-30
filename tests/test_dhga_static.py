@@ -16,14 +16,14 @@ from dhga.geometry.ray_sampler import make_ray_offsets_mm, sample_along_normals
 from dhga.geometry.transport_head import GeometryTransportHead
 from dhga.geometry.boundary_points import extract_boundary_points, sparse_displacements_to_dense_narrowband
 from dhga.geometry.sdf import mask_to_sdf, sdf_normals, update_sdf_with_displacement
-from dhga.inference import finalize_mask, finalize_probability
+from dhga.inference import finalize_mask, finalize_probability, geometry_effective_gate
 from dhga.losses import cross_supervision_loss, weighted_bce_prob
 from dhga.routing import DisagreementRouter
 from dhga.shared_voxtell import SharedEncoderOnce
 from dhga.trainer import DHGASmokeModel, run_synthetic_smoke
 from dhga.trainer import DHGAStageTrainer
 from dhga.teacher import EMATeacher
-from dhga.evaluation import compute_binary_case_metrics, compute_raw_disagreement_metrics, connected_components_3d, spacing_from_reader_properties, write_float_volume_like_reader
+from dhga.evaluation import compute_binary_case_metrics, compute_geometry_case_metrics, compute_raw_disagreement_metrics, connected_components_3d, spacing_from_reader_properties, surface_distance_metrics, write_float_volume_like_reader
 from dhga.voxtell_model import DHGAVoxTellModel, PromptConditionedRayTokens
 
 
@@ -203,6 +203,39 @@ class DHGAStaticTests(unittest.TestCase):
         self.assertTrue(torch.equal(displaced, region))
         displaced = finalize_probability(region, sdf, torch.zeros_like(region), torch.ones_like(region), config)
         self.assertTrue(torch.equal(displaced, region))
+
+    def test_geometry_effective_gate_requires_disagreement_boundary_and_validity(self):
+        config = DHGAConfig(dhga_geometry_boundary_band_mm=6.0, dhga_geometry_min_gate=0.0)
+        w_geo = torch.ones(1, 1, 1, 1, 4)
+        disagreement = torch.tensor([[[[[1.0, 0.0, 1.0, 1.0]]]]])
+        sdf = torch.tensor([[[[[0.0, 0.0, 7.0, 0.0]]]]])
+        valid = torch.tensor([[[[[1.0, 1.0, 1.0, 0.0]]]]])
+        displacement = torch.ones_like(w_geo)
+        gate = geometry_effective_gate(w_geo, disagreement, sdf, config, valid, displacement)
+        self.assertEqual(gate.flatten().tolist(), [1.0, 0.0, 0.0, 0.0])
+
+    def test_finalize_clamps_displacement_and_preserves_far_regions(self):
+        config = DHGAConfig(dhga_geometry_enabled=True, dhga_geometry_max_displacement_mm=3.0, dhga_geometry_boundary_band_mm=6.0)
+        region = torch.full((1, 1, 1, 1, 2), 0.5)
+        sdf = torch.tensor([[[[[0.0, 10.0]]]]])
+        disp = torch.full_like(region, 30.0)
+        final = finalize_probability(region, sdf, disp, torch.ones_like(region), config, expert_disagreement=torch.ones_like(region))
+        expected_active = torch.sigmoid(torch.tensor(3.0))
+        self.assertAlmostEqual(float(final[..., 0]), float(expected_active), places=5)
+        self.assertAlmostEqual(float(final[..., 1]), 0.5, places=5)
+
+    def test_surface_and_geometry_case_metrics_report_before_after(self):
+        gt = torch.zeros(5, 5, 5, dtype=torch.bool).numpy()
+        gt[1:4, 1:4, 1:4] = True
+        fused = gt.copy()
+        fused[1, 1, 1] = False
+        final = gt.copy()
+        surface = surface_distance_metrics(final, gt, (1.0, 1.0, 1.0), 1.0)
+        self.assertEqual(surface["surface_dice"], 1.0)
+        metrics = compute_geometry_case_metrics(fused, final, gt, (1.0, 1.0, 1.0), 1.0)
+        self.assertGreater(metrics["geometry_after_dice"], metrics["fused_before_geometry_dice"])
+        self.assertEqual(metrics["geometry_tp_delta"], 1)
+        self.assertEqual(metrics["geometry_fn_delta"], -1)
 
     def test_config_json_explicit_cli_overrides(self):
         import run_3d_dhga
@@ -466,7 +499,7 @@ class DHGAStaticTests(unittest.TestCase):
                 pass
 
             def evaluate_split(self, split, max_cases):
-                return {"mean_dice": 0.7, "rows": []}
+                return {"mean_fused_dice": 0.7, "rows": []}
 
         trainer = DHGAStageTrainer.__new__(DHGAStageTrainer)
         trainer.config = DHGAConfig(dhga_stage="B", val_label_dir="/tmp")
@@ -477,6 +510,7 @@ class DHGAStaticTests(unittest.TestCase):
         trainer.scaler = None
         trainer.global_step = 3
         trainer.best_validation_score = None
+        trainer.best_epoch = None
         trainer.writer = FakeWriter()
         trainer.prompts = ["liver"]
         trainer.predictor = SimpleNamespace()
@@ -489,9 +523,12 @@ class DHGAStaticTests(unittest.TestCase):
             trainer._run_periodic_test_evaluation(2, {"epoch_loss_mean": 1.0})
         finally:
             evaluation_module.DHGAEvaluator = original
-        self.assertTrue((trainer.save_dir / "checkpoint_best.pt").exists())
+        self.assertTrue((trainer.save_dir / "best_stage_b.pt").exists())
+        self.assertTrue((trainer.save_dir / "last_stage_b.pt").exists())
+        payload = load_training_checkpoint(trainer.save_dir / "best_stage_b.pt", trainer.model, load_training_state=False)
+        self.assertEqual(payload["metadata"]["best_metric"], "mean_fused_dice")
+        self.assertEqual(payload["metadata"]["best_epoch"], 2)
         self.assertFalse((trainer.save_dir / "checkpoint_epoch_0002.pt").exists())
-        self.assertFalse((trainer.save_dir / "checkpoint_last.pt").exists())
 
     def test_epoch_metrics_include_distribution_summary(self):
         trainer = DHGAStageTrainer.__new__(DHGAStageTrainer)

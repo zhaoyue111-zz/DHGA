@@ -60,6 +60,9 @@ class DHGAConfig:
     dhga_geometry_feature_layer: int = -1
     dhga_geometry_feature_channels: int = 8
     dhga_displacement_diffusion_mm: float = 2.0
+    dhga_geometry_max_displacement_mm: float = 3.0
+    dhga_geometry_boundary_band_mm: float = 6.0
+    dhga_geometry_min_gate: float = 1e-4
     dhga_corruption_max_offset_mm: float = 3.0
     dhga_corruption_modes: list[str] = field(default_factory=lambda: ["inward", "outward"])
     dhga_boundary_recovery_weight: float = 1.0
@@ -118,6 +121,12 @@ class DHGAConfig:
             raise ValueError("dhga_geometry_feature_channels must be positive")
         if self.dhga_displacement_diffusion_mm <= 0:
             raise ValueError("dhga_displacement_diffusion_mm must be positive")
+        if self.dhga_geometry_max_displacement_mm <= 0:
+            raise ValueError("dhga_geometry_max_displacement_mm must be positive")
+        if self.dhga_geometry_boundary_band_mm <= 0:
+            raise ValueError("dhga_geometry_boundary_band_mm must be positive")
+        if self.dhga_geometry_min_gate < 0:
+            raise ValueError("dhga_geometry_min_gate must be non-negative")
         if self.dhga_boundary_chunk_size <= 0 or self.dhga_max_boundary_points <= 0:
             raise ValueError("boundary chunk and max points must be positive")
         if self.dhga_corruption_max_offset_mm <= 0:

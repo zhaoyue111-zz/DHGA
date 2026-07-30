@@ -118,6 +118,7 @@ class DHGAStageTrainer:
         self.start_epoch = 0
         self.global_step = 0
         self.best_validation_score: float | None = None
+        self.best_epoch: int | None = None
         self.stage_b_anchor_cache: dict[str, list[dict]] = {}
         self._load_initial_or_resume()
         self._init_io()
@@ -292,6 +293,8 @@ class DHGAStageTrainer:
             metadata = payload.get("metadata", {})
             if isinstance(metadata.get("best_score"), (int, float)):
                 self.best_validation_score = float(metadata["best_score"])
+            if isinstance(metadata.get("best_epoch"), (int, float)):
+                self.best_epoch = int(metadata["best_epoch"])
             return
         if self.config.init_checkpoint:
             load_training_checkpoint(
@@ -412,7 +415,7 @@ class DHGAStageTrainer:
                             patch_bar.set_postfix({"loss": f"{float(metrics.get('loss', 0.0)):.4f}", "kind": patch_kind, "case": Path(path).name[:18]})
                             patch_bar.update(1)
                 epoch_metrics = self._log_epoch_metrics(epoch + 1, epoch_records)
-                if self.config.dhga_stage == "B" and (epoch + 1) % self.config.dhga_validation_interval_epochs == 0:
+                if self.config.dhga_stage in {"B", "C"} and (epoch + 1) % self.config.dhga_validation_interval_epochs == 0:
                     self._run_periodic_test_evaluation(epoch + 1, epoch_metrics)
         finally:
             if self.writer is not None:
@@ -426,7 +429,13 @@ class DHGAStageTrainer:
             scaler=self.scaler,
             epoch=self.config.epochs,
             global_step=self.global_step,
-            metadata={"stage": self.config.dhga_stage, "history": history[-256:]},
+            metadata={
+                "stage": self.config.dhga_stage,
+                "history": history[-256:],
+                "best_metric": "mean_fused_dice" if self.config.dhga_stage == "B" else None,
+                "best_score": self.best_validation_score,
+                "best_epoch": self.best_epoch,
+            },
         )
         (self.save_dir / "history.json").write_text(json.dumps(history, indent=2))
         if self.writer is not None:
@@ -643,11 +652,12 @@ class DHGAStageTrainer:
             for key, value in metrics.items():
                 if key != "rows" and isinstance(value, (int, float)) and value is not None:
                     self.writer.add_scalar(f"test/{key}", float(value), epoch)
-        score = metrics.get("mean_dice")
-        if isinstance(score, (int, float)) and (self.best_validation_score is None or float(score) > self.best_validation_score):
-            self.best_validation_score = float(score)
+        score = metrics.get("mean_fused_dice")
+        if not isinstance(score, (int, float)):
+            score = metrics.get("mean_dice")
+        if self.config.dhga_stage == "B" and isinstance(score, (int, float)):
             save_training_checkpoint(
-                self.save_dir / "checkpoint_best.pt",
+                self.save_dir / "last_stage_b.pt",
                 self.model,
                 self.config,
                 optimizer=self.optimizer,
@@ -657,8 +667,31 @@ class DHGAStageTrainer:
                 global_step=self.global_step,
                 metadata={
                     "stage": self.config.dhga_stage,
-                    "best_metric": "mean_dice",
+                    "best_metric": "mean_fused_dice",
+                    "score": float(score),
                     "best_score": self.best_validation_score,
+                    "best_epoch": self.best_epoch,
+                    "epoch_metrics": epoch_metrics or {},
+                    "test_metrics": {k: v for k, v in metrics.items() if k != "rows"},
+                },
+            )
+        if self.config.dhga_stage == "B" and isinstance(score, (int, float)) and (self.best_validation_score is None or float(score) > self.best_validation_score):
+            self.best_validation_score = float(score)
+            self.best_epoch = int(epoch)
+            save_training_checkpoint(
+                self.save_dir / "best_stage_b.pt",
+                self.model,
+                self.config,
+                optimizer=self.optimizer,
+                ema=self.teacher if self.teacher is not None else None,
+                scaler=self.scaler,
+                epoch=epoch,
+                global_step=self.global_step,
+                metadata={
+                    "stage": self.config.dhga_stage,
+                    "best_metric": "mean_fused_dice",
+                    "best_score": self.best_validation_score,
+                    "best_epoch": self.best_epoch,
                     "epoch_metrics": epoch_metrics or {},
                     "test_metrics": {k: v for k, v in metrics.items() if k != "rows"},
                 },

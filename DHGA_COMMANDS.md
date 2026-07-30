@@ -77,6 +77,10 @@ CUDA_VISIBLE_DEVICES=0 conda run -n voxtell python run_3d_dhga.py \
 
 ## Stage B Dual Expert Training
 
+Validation uses `mean_fused_dice`; the best validation checkpoint is
+`.save/dhga/stage_b/best_stage_b.pt` and the most recent validation checkpoint
+is `.save/dhga/stage_b/last_stage_b.pt`. Use `best_stage_b.pt` for Stage C.
+
 ```bash
 CUDA_VISIBLE_DEVICES=0 conda run -n voxtell python run_3d_dhga.py \
   --train \
@@ -108,8 +112,10 @@ CUDA_VISIBLE_DEVICES=0 conda run -n voxtell python run_3d_dhga.py \
 CUDA_VISIBLE_DEVICES=0 conda run -n voxtell python run_3d_dhga.py \
   --train \
   --dhga_stage C \
-  --init_checkpoint .save/dhga/stage_b/checkpoint_final.pt \
+  --init_checkpoint .save/dhga/stage_b/best_stage_b.pt \
   --dhga_geometry_enabled \
+  --dhga_geometry_max_displacement_mm 3.0 \
+  --dhga_geometry_boundary_band_mm 6.0 \
   --dhga_search_radius_mm 6.0 \
   --dhga_surface_tolerance_mm 1.0 \
   --dhga_ray_step_mm 1.0 \
@@ -130,6 +136,12 @@ CUDA_VISIBLE_DEVICES=0 conda run -n voxtell python run_3d_dhga.py \
   --device cuda \
   --epochs 10 \
   --steps_per_volume 2
+```
+
+## Stage C Smoke
+
+```bash
+./smoke_stage_c.sh
 ```
 
 ## Stage D Natural Disagreement Geometry

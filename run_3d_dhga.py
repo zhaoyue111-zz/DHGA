@@ -19,6 +19,9 @@ ARCHITECTURE_KEYS = {
     "dhga_appearance_hidden_ratio",
     "dhga_geometry_feature_layer",
     "dhga_geometry_feature_channels",
+    "dhga_geometry_max_displacement_mm",
+    "dhga_geometry_boundary_band_mm",
+    "dhga_geometry_min_gate",
     "dhga_router_normalization",
     "dhga_search_radius_mm",
     "dhga_ray_step_mm",
@@ -90,6 +93,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dhga_geometry_feature_layer", type=int, default=-1)
     parser.add_argument("--dhga_geometry_feature_channels", type=int, default=8)
     parser.add_argument("--dhga_displacement_diffusion_mm", type=float, default=2.0)
+    parser.add_argument("--dhga_geometry_max_displacement_mm", type=float, default=3.0)
+    parser.add_argument("--dhga_geometry_boundary_band_mm", type=float, default=6.0)
+    parser.add_argument("--dhga_geometry_min_gate", type=float, default=1e-4)
     parser.add_argument("--dhga_corruption_max_offset_mm", type=float, default=3.0)
     parser.add_argument("--dhga_corruption_modes", nargs="*", default=["inward", "outward"])
     parser.add_argument("--dhga_boundary_recovery_weight", type=float, default=1.0)
@@ -183,6 +189,9 @@ def config_from_args(args: argparse.Namespace) -> DHGAConfig:
         dhga_geometry_feature_layer=args.dhga_geometry_feature_layer,
         dhga_geometry_feature_channels=args.dhga_geometry_feature_channels,
         dhga_displacement_diffusion_mm=args.dhga_displacement_diffusion_mm,
+        dhga_geometry_max_displacement_mm=args.dhga_geometry_max_displacement_mm,
+        dhga_geometry_boundary_band_mm=args.dhga_geometry_boundary_band_mm,
+        dhga_geometry_min_gate=args.dhga_geometry_min_gate,
         dhga_corruption_max_offset_mm=args.dhga_corruption_max_offset_mm,
         dhga_corruption_modes=list(args.dhga_corruption_modes),
         dhga_boundary_recovery_weight=args.dhga_boundary_recovery_weight,
