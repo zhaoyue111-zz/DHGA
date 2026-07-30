@@ -358,7 +358,7 @@ class DHGAVoxTellModel(nn.Module):
         )
         dense, dense_weight = sparse_displacements_to_dense_narrowband(
             points,
-            sparse_displacement * self._sample_point_weight(router.geometry_disagreement_weight, points),
+            sparse_displacement,
             valid_points,
             tuple(image.shape[-3:]),
             spacing=spacing,

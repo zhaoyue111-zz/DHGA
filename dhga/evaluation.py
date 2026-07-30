@@ -383,6 +383,10 @@ def compute_geometry_case_metrics(
     fused_surface = surface_distance_metrics(fused, gt, spacing, surface_tolerance_mm)
     final_surface = surface_distance_metrics(final, gt, spacing, surface_tolerance_mm)
     modified = fused ^ final
+    tp_gained = np.logical_and.reduce((gt, ~fused, final))
+    tp_lost = np.logical_and.reduce((gt, fused, ~final))
+    fp_added = np.logical_and.reduce((~gt, ~fused, final))
+    fp_removed = np.logical_and.reduce((~gt, fused, ~final))
     return {
         "fused_before_geometry_dice": fused_base["dice"],
         "geometry_after_dice": final_base["dice"],
@@ -395,6 +399,12 @@ def compute_geometry_case_metrics(
         "fused_before_geometry_assd": fused_surface["assd"],
         "geometry_after_assd": final_surface["assd"],
         "geometry_modified_voxel_ratio_case": float(modified.mean()) if modified.size else 0.0,
+        "geometry_tp_gained_voxels": int(tp_gained.sum()),
+        "geometry_tp_lost_voxels": int(tp_lost.sum()),
+        "geometry_fn_recovered_voxels": int(tp_gained.sum()),
+        "geometry_fn_added_voxels": int(tp_lost.sum()),
+        "geometry_fp_added_voxels": int(fp_added.sum()),
+        "geometry_fp_removed_voxels": int(fp_removed.sum()),
         "geometry_tp_delta": int(final_base["tp_voxels"] - fused_base["tp_voxels"]),
         "geometry_fn_delta": int(final_base["fn_voxels"] - fused_base["fn_voxels"]),
         "geometry_fp_delta": int(final_base["fp_voxels"] - fused_base["fp_voxels"]),

@@ -1,5 +1,6 @@
 from pathlib import Path
 from types import SimpleNamespace
+import inspect
 import json
 import random
 import sys
@@ -230,12 +231,22 @@ class DHGAStaticTests(unittest.TestCase):
         fused = gt.copy()
         fused[1, 1, 1] = False
         final = gt.copy()
+        final[0, 0, 0] = True
         surface = surface_distance_metrics(final, gt, (1.0, 1.0, 1.0), 1.0)
-        self.assertEqual(surface["surface_dice"], 1.0)
+        self.assertGreater(surface["surface_dice"], 0.0)
         metrics = compute_geometry_case_metrics(fused, final, gt, (1.0, 1.0, 1.0), 1.0)
         self.assertGreater(metrics["geometry_after_dice"], metrics["fused_before_geometry_dice"])
         self.assertEqual(metrics["geometry_tp_delta"], 1)
         self.assertEqual(metrics["geometry_fn_delta"], -1)
+        self.assertEqual(metrics["geometry_tp_gained_voxels"], 1)
+        self.assertEqual(metrics["geometry_tp_lost_voxels"], 0)
+        self.assertEqual(metrics["geometry_fn_recovered_voxels"], 1)
+        self.assertEqual(metrics["geometry_fp_added_voxels"], 1)
+
+    def test_geometry_dense_scatter_does_not_apply_disagreement_weight_twice(self):
+        source = inspect.getsource(DHGAVoxTellModel.run_geometry)
+        self.assertIn("sparse_displacement,", source)
+        self.assertNotIn("sparse_displacement * self._sample_point_weight", source)
 
     def test_config_json_explicit_cli_overrides(self):
         import run_3d_dhga
