@@ -17,10 +17,6 @@ ARCHITECTURE_KEYS = {
     "dhga_semantic_adapter_target",
     "dhga_appearance_feature_layers",
     "dhga_appearance_hidden_ratio",
-    "dhga_stage_b_method",
-    "dhga_stage_b_v4_head_channels",
-    "dhga_stage_b_v4_max_fusion_voxels",
-    "dhga_stage_b_v4_proto_tau",
     "dhga_geometry_feature_layer",
     "dhga_geometry_feature_channels",
     "dhga_geometry_max_displacement_mm",
@@ -62,17 +58,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tensorboard_enabled", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--tensorboard_log_interval", type=int, default=1)
     parser.add_argument("--tensorboard_image_interval", type=int, default=50)
-    parser.add_argument("--dhga_stage_b_method", choices=("legacy", "prototype_v4"), default="legacy")
     parser.add_argument("--dhga_stage_b_anchor_candidate_patches", type=int, default=24)
     parser.add_argument("--dhga_stage_b_include_background_patch", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--dhga_stage_b_v4_bootstrap_epochs", type=int, default=1)
-    parser.add_argument("--dhga_stage_b_v4_head_channels", type=int, default=16)
-    parser.add_argument("--dhga_stage_b_v4_max_fusion_voxels", type=int, default=64 * 64 * 64)
-    parser.add_argument("--dhga_stage_b_v4_seed_sample_voxels", type=int, default=2048)
-    parser.add_argument("--dhga_stage_b_v4_proto_sample_limit", type=int, default=8192)
-    parser.add_argument("--dhga_stage_b_v4_proto_tau", type=float, default=0.1)
-    parser.add_argument("--dhga_stage_b_v4_reliable_high", type=float, default=0.8)
-    parser.add_argument("--dhga_stage_b_v4_reliable_low", type=float, default=0.2)
     parser.add_argument("--dhga_validation_interval_epochs", type=int, default=2)
     parser.add_argument("--val_label_dir", default="/data/zy/CT_MRI_DATA_3D/labels/P0")
     parser.add_argument("--label_values", nargs="*", type=int, default=[5])
@@ -170,17 +157,8 @@ def config_from_args(args: argparse.Namespace) -> DHGAConfig:
         tensorboard_enabled=args.tensorboard_enabled,
         tensorboard_log_interval=args.tensorboard_log_interval,
         tensorboard_image_interval=args.tensorboard_image_interval,
-        dhga_stage_b_method=args.dhga_stage_b_method,
         dhga_stage_b_anchor_candidate_patches=args.dhga_stage_b_anchor_candidate_patches,
         dhga_stage_b_include_background_patch=args.dhga_stage_b_include_background_patch,
-        dhga_stage_b_v4_bootstrap_epochs=args.dhga_stage_b_v4_bootstrap_epochs,
-        dhga_stage_b_v4_head_channels=args.dhga_stage_b_v4_head_channels,
-        dhga_stage_b_v4_max_fusion_voxels=args.dhga_stage_b_v4_max_fusion_voxels,
-        dhga_stage_b_v4_seed_sample_voxels=args.dhga_stage_b_v4_seed_sample_voxels,
-        dhga_stage_b_v4_proto_sample_limit=args.dhga_stage_b_v4_proto_sample_limit,
-        dhga_stage_b_v4_proto_tau=args.dhga_stage_b_v4_proto_tau,
-        dhga_stage_b_v4_reliable_high=args.dhga_stage_b_v4_reliable_high,
-        dhga_stage_b_v4_reliable_low=args.dhga_stage_b_v4_reliable_low,
         dhga_validation_interval_epochs=args.dhga_validation_interval_epochs,
         init_checkpoint=args.init_checkpoint,
         resume_checkpoint=args.resume_checkpoint,
