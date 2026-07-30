@@ -74,6 +74,15 @@ class DHGAEvaluator:
                 app_pred = getattr(self, "last_appearance_pred", pred)
                 fused_pred = getattr(self, "last_fused_pred", pred)
                 row.update(compute_binary_case_metrics(pred, gt, sem_pred, app_pred))
+                simple_pred = getattr(self, "last_simple_average_pred", None)
+                zero_pred = getattr(self, "last_zero_shot_pred", None)
+                if simple_pred is not None:
+                    simple_base = _binary_metric_values(simple_pred, gt)
+                    row["simple_average_dice"] = simple_base["dice"]
+                if zero_pred is not None:
+                    zero_base = _binary_metric_values(zero_pred, gt)
+                    row["zero_shot_dice"] = zero_base["dice"]
+                row["prototype_fused_dice"] = row.get("dice", 0.0)
                 row.update(compute_geometry_case_metrics(fused_pred, pred, gt, spacing_from_reader_properties(image_props), self.config.dhga_surface_tolerance_mm))
                 raw_disagreement = getattr(self, "last_raw_disagreement", None)
                 if raw_disagreement is not None:
@@ -114,6 +123,8 @@ class DHGAEvaluator:
         data, slicer_revert_padding = self.pad_nd_image(data, tuple(self.predictor.patch_size), "constant", {"value": 0}, True, None)
         slicers = self.predictor._internal_get_sliding_window_slicers(data.shape[1:])
         data_t = torch.as_tensor(data[None], device=self.device, dtype=torch.float32)
+        if self.config.dhga_stage == "B" and self.config.dhga_stage_b_method == "prototype_v4":
+            return self._predict_case_stage_b_v4(data_t, slicers, slicer_revert_padding, bbox, orig_shape, props, spacing)
         sem_sum = torch.zeros((1, 1, *data.shape[1:]), device=self.device)
         app_sum = torch.zeros_like(sem_sum)
         count = torch.zeros_like(sem_sum)
@@ -207,6 +218,66 @@ class DHGAEvaluator:
         self.last_semantic_pred = sem_reverted[0] >= self.config.pred_threshold
         self.last_appearance_pred = app_reverted[0] >= self.config.pred_threshold
         self.last_case_diagnostics.update(geometry_stats)
+        return reverted, props
+
+    def _predict_case_stage_b_v4(self, data_t: torch.Tensor, slicers: list, slicer_revert_padding, bbox, orig_shape, props: dict, spacing: tuple[float, float, float]) -> tuple[np.ndarray, dict]:
+        data_shape = tuple(data_t.shape[-3:])
+        sem_sum = torch.zeros((1, 1, *data_shape), device=self.device)
+        app_sum = torch.zeros_like(sem_sum)
+        fused_sum = torch.zeros_like(sem_sum)
+        anchor_sum = torch.zeros_like(sem_sum)
+        count = torch.zeros_like(sem_sum)
+        self.model.eval()
+        with torch.no_grad():
+            for slicer in slicers:
+                patch = torch.clone(data_t[(slice(None), *slicer)], memory_format=torch.contiguous_format)
+                out = self.model.forward_stage_b_v4(patch, spacing, compute_anchor=True)
+                target_shape = patch.shape[-3:]
+                sem = F.interpolate(out.semantic_prob, size=target_shape, mode="trilinear", align_corners=False)
+                app = F.interpolate(out.appearance_prob, size=target_shape, mode="trilinear", align_corners=False)
+                fused = F.interpolate(out.final_prob, size=target_shape, mode="trilinear", align_corners=False)
+                anchor = F.interpolate(out.anchor_prob, size=target_shape, mode="trilinear", align_corners=False)
+                region = (slice(None), slice(None), *slicer[1:])
+                sem_sum[region] += sem
+                app_sum[region] += app
+                fused_sum[region] += fused
+                anchor_sum[region] += anchor
+                count[region] += 1
+        sem_prob = sem_sum / count.clamp_min(1)
+        app_prob = app_sum / count.clamp_min(1)
+        final = fused_sum / count.clamp_min(1)
+        anchor_prob = anchor_sum / count.clamp_min(1)
+        simple = 0.5 * (sem_prob + app_prob)
+        sem_mask = sem_prob >= self.config.pred_threshold
+        app_mask = app_prob >= self.config.pred_threshold
+        union = sem_mask | app_mask
+        self.last_case_diagnostics = {
+            "semantic_appearance_complement_rate": float(((sem_mask ^ app_mask).float().sum().cpu()) / union.float().sum().clamp_min(1.0).cpu()),
+            "semantic_only_voxels": int((sem_mask & ~app_mask).sum().cpu()),
+            "appearance_only_voxels": int((app_mask & ~sem_mask).sum().cpu()),
+            "stage_b_v4_eval": 1.0,
+            "semantic_eval_pred_volume": float(sem_mask.float().mean().cpu()),
+            "appearance_eval_pred_volume": float(app_mask.float().mean().cpu()),
+            "simple_average_eval_pred_volume": float((simple >= self.config.pred_threshold).float().mean().cpu()),
+            "prototype_fused_eval_pred_volume": float((final >= self.config.pred_threshold).float().mean().cpu()),
+            "zero_shot_eval_pred_volume": float((anchor_prob >= self.config.pred_threshold).float().mean().cpu()),
+        }
+        final = final[(slice(None), slice(None), *slicer_revert_padding[1:])].cpu().numpy()[0]
+        sem_crop = sem_prob[(slice(None), slice(None), *slicer_revert_padding[1:])].cpu().numpy()[0]
+        app_crop = app_prob[(slice(None), slice(None), *slicer_revert_padding[1:])].cpu().numpy()[0]
+        simple_crop = simple[(slice(None), slice(None), *slicer_revert_padding[1:])].cpu().numpy()[0]
+        anchor_crop = anchor_prob[(slice(None), slice(None), *slicer_revert_padding[1:])].cpu().numpy()[0]
+        reverted = self.insert_crop_into_image(np.zeros((final.shape[0], *orig_shape), dtype=np.float32), final, bbox)
+        sem_reverted = self.insert_crop_into_image(np.zeros((sem_crop.shape[0], *orig_shape), dtype=np.float32), sem_crop, bbox)
+        app_reverted = self.insert_crop_into_image(np.zeros((app_crop.shape[0], *orig_shape), dtype=np.float32), app_crop, bbox)
+        simple_reverted = self.insert_crop_into_image(np.zeros((simple_crop.shape[0], *orig_shape), dtype=np.float32), simple_crop, bbox)
+        anchor_reverted = self.insert_crop_into_image(np.zeros((anchor_crop.shape[0], *orig_shape), dtype=np.float32), anchor_crop, bbox)
+        self.last_raw_disagreement = np.abs(sem_reverted[0].astype(np.float32) - app_reverted[0].astype(np.float32))
+        self.last_fused_pred = simple_reverted[0] >= self.config.pred_threshold
+        self.last_semantic_pred = sem_reverted[0] >= self.config.pred_threshold
+        self.last_appearance_pred = app_reverted[0] >= self.config.pred_threshold
+        self.last_simple_average_pred = simple_reverted[0] >= self.config.pred_threshold
+        self.last_zero_shot_pred = anchor_reverted[0] >= self.config.pred_threshold
         return reverted, props
 
 

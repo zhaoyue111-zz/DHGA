@@ -25,10 +25,184 @@ from dhga.trainer import DHGASmokeModel, run_synthetic_smoke
 from dhga.trainer import DHGAStageTrainer
 from dhga.teacher import EMATeacher
 from dhga.evaluation import compute_binary_case_metrics, compute_geometry_case_metrics, compute_raw_disagreement_metrics, connected_components_3d, spacing_from_reader_properties, surface_distance_metrics, write_float_volume_like_reader
+from dhga.stage_b_v4 import (
+    AppearanceSegHead,
+    TargetPrototypeBank,
+    balanced_masked_bce,
+    make_reliability_masks,
+    masked_dice_loss,
+    prototype_reliability_fusion,
+)
 from dhga.voxtell_model import DHGAVoxTellModel, PromptConditionedRayTokens
 
 
 class DHGAStaticTests(unittest.TestCase):
+    def _make_fake_v4_model(self, config: DHGAConfig | None = None):
+        class FakeEncoder(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.stem = None
+                self.stages = torch.nn.ModuleList([
+                    torch.nn.Conv3d(1, 4, 3, padding=1),
+                    torch.nn.Conv3d(4, 8, 3, stride=2, padding=1),
+                ])
+
+        class FakeDecoderLayer(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.self_attn = torch.nn.MultiheadAttention(8, 1)
+                self.multihead_attn = torch.nn.MultiheadAttention(8, 1)
+
+        class FakeTransformerDecoder(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.layers = torch.nn.ModuleList([FakeDecoderLayer()])
+
+            def forward(self, tgt, memory, pos=None, memory_key_padding_mask=None):
+                out, _ = self.layers[0].multihead_attn(tgt, memory, memory, need_weights=False)
+                return tgt + out, None
+
+        class FakePromptDecoder(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.conv = torch.nn.Conv3d(8, 1, 1)
+
+            def forward(self, skips, prompt_embeds):
+                prompt = prompt_embeds[-1].mean().to(skips[-1].dtype)
+                return [self.conv(skips[-1]) + prompt]
+
+        class FakeNetwork(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.encoder = FakeEncoder()
+                self.selected_decoder_layer = -1
+                self.project_bottleneck_embed = torch.nn.Linear(8, 8)
+                self.project_text_embed = torch.nn.Linear(8, 8)
+                self.transformer_decoder = FakeTransformerDecoder()
+                self.project_to_decoder_channels = torch.nn.ModuleList([torch.nn.Linear(8, 8)])
+                self.decoder = FakePromptDecoder()
+                self.pos_embed = torch.zeros(1, 1, 8)
+
+        config = config or DHGAConfig(
+            dhga_stage="B",
+            dhga_stage_b_method="prototype_v4",
+            dhga_appearance_feature_layers=[0, 1],
+            dhga_appearance_feature_dropout=0.0,
+            dhga_geometry_enabled=False,
+            dhga_stage_b_v4_head_channels=4,
+            dhga_stage_b_v4_max_fusion_voxels=1024,
+        )
+        text = torch.linspace(-0.5, 0.5, 8).view(1, 1, 8)
+        return DHGAVoxTellModel(FakeNetwork(), text, config, num_classes=1, num_templates=1)
+
+    def test_appearance_seg_head_multiscale_shapes(self):
+        head = AppearanceSegHead([4, 8, 16], [0, 1, 2], proj_channels=5, max_fusion_voxels=10 * 12 * 8)
+        features = [
+            torch.randn(2, 4, 10, 12, 8),
+            torch.randn(2, 8, 5, 6, 4),
+            torch.randn(2, 16, 3, 4, 2),
+        ]
+        out = head(features, (20, 24, 16))
+        self.assertEqual(out["appearance_feature"].shape[:2], (2, 5))
+        self.assertLessEqual(int(torch.tensor(out["appearance_feature"].shape[-3:]).prod()), 10 * 12 * 8)
+        self.assertEqual(out["appearance_logits_lowres"].shape[1], 1)
+        self.assertEqual(out["appearance_logits"].shape, (2, 1, 20, 24, 16))
+
+    def test_stage_b_v4_forward_uses_one_encoder_and_appearance_skips_text_decoder(self):
+        model = self._make_fake_v4_model()
+        image = torch.randn(1, 1, 8, 8, 8)
+        out = model.forward_stage_b_v4(image, compute_anchor=False)
+        self.assertEqual(model.encoder_calls, 1)
+        self.assertEqual(model.text_decoder_calls, 1)
+        self.assertIsNotNone(out.v4)
+        self.assertEqual(out.appearance_logits.shape, out.semantic_logits.shape)
+
+    def test_prototype_bank_init_similarity_and_checkpoint_roundtrip(self):
+        bank = TargetPrototypeBank(3, 2, tau=0.1)
+        sem_fg = torch.tensor([[1.0, 0.0, 0.0], [0.9, 0.1, 0.0]])
+        sem_bg = torch.tensor([[0.0, 1.0, 0.0]])
+        app_fg = torch.tensor([[1.0, 0.0]])
+        app_bg = torch.tensor([[0.0, 1.0], [0.0, 0.9]])
+        bank.initialize_view("semantic", sem_fg, sem_bg, seed=3)
+        bank.initialize_view("appearance", app_fg, app_bg, seed=4)
+        self.assertEqual(bank.valid_counts()["semantic_fg"], 2)
+        self.assertEqual(bank.valid_counts()["semantic_bg"], 1)
+        feat = torch.tensor([[[[[1.0]]], [[[0.0]]], [[[0.0]]]]])
+        q, _ = bank.prototype_probability("semantic", feat)
+        self.assertGreater(float(q), 0.9)
+        restored = TargetPrototypeBank(3, 2, tau=0.1)
+        restored.load_state_dict(bank.state_dict())
+        q2, _ = restored.prototype_probability("semantic", feat)
+        self.assertTrue(torch.allclose(q, q2))
+        self.assertEqual(restored.valid_counts(), bank.valid_counts())
+
+    def test_stage_b_v4_masks_are_mutually_exclusive(self):
+        q_sem = torch.tensor([[[[[0.9, 0.9, 0.5, 0.9, 0.1]]]]])
+        q_app = torch.tensor([[[[[0.8, 0.5, 0.1, 0.1, 0.5]]]]])
+        sem = torch.tensor([[[[[0.9, 0.9, 0.5, 0.9, 0.1]]]]])
+        app = torch.tensor([[[[[0.8, 0.8, 0.2, 0.8, 0.1]]]]])
+        masks = make_reliability_masks(q_sem, q_app, sem, app)
+        total = masks.joint.int() + masks.semantic_only.int() + masks.appearance_only.int() + masks.conflict.int() + masks.reject.int()
+        self.assertTrue(torch.equal(total, torch.ones_like(total)))
+        self.assertTrue(bool(masks.joint[..., 0]))
+        self.assertTrue(bool(masks.semantic_only[..., 1]))
+        self.assertTrue(bool(masks.appearance_only[..., 2]))
+        self.assertTrue(bool(masks.conflict[..., 3]))
+        self.assertTrue(bool(masks.semantic_only[..., 4]))
+
+    def test_stage_b_v4_losses_are_finite_on_edge_cases(self):
+        prob = torch.full((1, 1, 1, 1, 4), 0.4, requires_grad=True)
+        target_bg = torch.zeros_like(prob)
+        bg_weight = torch.ones_like(prob)
+        self.assertTrue(torch.isfinite(balanced_masked_bce(prob, target_bg, bg_weight)))
+        self.assertTrue(torch.isfinite(masked_dice_loss(prob, target_bg, bg_weight)))
+        reject = torch.zeros_like(prob)
+        loss = balanced_masked_bce(prob, target_bg, reject) + masked_dice_loss(prob, target_bg, reject)
+        self.assertTrue(torch.isfinite(loss))
+        loss.backward()
+        self.assertIsNotNone(prob.grad)
+
+    def test_stage_b_v4_adapt_gradients_and_frozen_router_geometry(self):
+        model = self._make_fake_v4_model()
+        trainer = DHGAStageTrainer.__new__(DHGAStageTrainer)
+        trainer.config = model.config
+        trainer.model = model
+        trainer.device = torch.device("cpu")
+        trainer.global_step = 0
+        trainer.current_epoch = 2
+        trainer.stage_b_v4_phase = "adapt"
+        trainer.stage_b_v4_skipped_updates = 0
+        trainer.stage_b_v4_samples = {"semantic_fg": [], "semantic_bg": [], "appearance_fg": [], "appearance_bg": []}
+        trainer._set_stage_trainability()
+        model.prototype_bank.initialize_view("semantic", torch.randn(3, 8), torch.randn(5, 8), seed=1)
+        model.prototype_bank.initialize_view("appearance", torch.randn(3, 4), torch.randn(5, 4), seed=2)
+        loss, metrics = trainer._stage_b_v4_adapt(torch.randn(1, 1, 8, 8, 8), (1.0, 1.0, 1.0))
+        self.assertEqual(metrics["dhga_legacy_losses_ignored"], 1.0)
+        loss.backward()
+        groups = trainer._stage_parameter_groups()
+        self.assertTrue(any(p.grad is not None and bool((p.grad.abs() > 0).any()) for _, p in groups["semantic_lora"]))
+        self.assertTrue(any(p.grad is not None and bool((p.grad.abs() > 0).any()) for _, p in groups["appearance_expert"]))
+        self.assertTrue(any(p.grad is not None and bool((p.grad.abs() > 0).any()) for _, p in groups["appearance_head"]))
+        self.assertFalse(any(p.grad is not None and bool((p.grad.abs() > 0).any()) for _, p in groups["router"]))
+        self.assertFalse(any(p.grad is not None and bool((p.grad.abs() > 0).any()) for _, p in groups["geometry"]))
+
+    def test_stage_b_v4_checkpoint_reload_keeps_fused_output(self):
+        model = self._make_fake_v4_model()
+        model.prototype_bank.initialize_view("semantic", torch.randn(3, 8), torch.randn(5, 8), seed=1)
+        model.prototype_bank.initialize_view("appearance", torch.randn(3, 4), torch.randn(5, 4), seed=2)
+        image = torch.randn(1, 1, 8, 8, 8)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "v4.pt"
+            save_training_checkpoint(path, model, model.config, metadata={"stage": "B"})
+            restored = self._make_fake_v4_model(model.config)
+            load_training_checkpoint(path, restored, load_training_state=False)
+        model.eval()
+        restored.eval()
+        with torch.no_grad():
+            out_a = model.forward_stage_b_v4(image).final_prob
+            out_b = restored.forward_stage_b_v4(image).final_prob
+        self.assertTrue(torch.allclose(out_a, out_b, atol=1e-6))
+
     def test_sdf_sign_and_displacement(self):
         mask = torch.zeros(1, 1, 9, 9, 9, dtype=torch.bool)
         mask[..., 3:6, 3:6, 3:6] = True

@@ -20,6 +20,13 @@ from .geometry.ray_sampler import sample_along_normals
 from .losses import boundary_recovery_loss, cross_supervision_loss, diagnostics_from_probs, minimal_transport_loss, weighted_bce_prob
 from .routing import DisagreementRouter
 from .shared_voxtell import SharedEncoderOnce, trainable_parameter_summary
+from .stage_b_v4 import (
+    balanced_masked_bce,
+    make_reliability_masks,
+    prototype_reliability_fusion,
+    stage_b_v4_expert_loss,
+    tensor_corr,
+)
 from .teacher import EMATeacher
 from .voxtell_model import DHGAVoxTellModel, build_dhga_voxtell_model
 from voxtell_sfda.adapter import load_split_manifest, random_slicer, set_seed
@@ -110,11 +117,14 @@ class DHGAStageTrainer:
         self.save_dir.mkdir(parents=True, exist_ok=True)
         self.model, self.predictor, self.prompts = build_dhga_voxtell_model(config, prompts)
         self.device = next(self.model.parameters()).device
+        self.stage_b_v4_phase = "adapt" if config.dhga_stage_b_method == "prototype_v4" else "legacy"
+        self.stage_b_v4_samples: dict[str, list[Tensor]] = {"semantic_fg": [], "semantic_bg": [], "appearance_fg": [], "appearance_bg": []}
+        self.stage_b_v4_skipped_updates = 0
         self._set_stage_trainability()
         self._validate_stage_trainability()
         self.optimizer = None if config.dhga_stage == "A" else self._build_optimizer()
         self.scaler = torch.amp.GradScaler("cuda", enabled=config.amp and self.device.type == "cuda")
-        self.teacher = EMATeacher(self.model, config.dhga_ema_decay) if config.dhga_use_ema_teacher else None
+        self.teacher = None if (config.dhga_stage == "B" and config.dhga_stage_b_method == "prototype_v4") else (EMATeacher(self.model, config.dhga_ema_decay) if config.dhga_use_ema_teacher else None)
         self.start_epoch = 0
         self.global_step = 0
         self.best_validation_score: float | None = None
@@ -141,6 +151,7 @@ class DHGAStageTrainer:
         groups = {
             "semantic_lora": [],
             "appearance_expert": [],
+            "appearance_head": [],
             "router": [],
             "geometry": [],
             "other": [],
@@ -150,6 +161,8 @@ class DHGAStageTrainer:
                 groups["semantic_lora"].append((name, param))
             elif name.startswith("appearance_expert."):
                 groups["appearance_expert"].append((name, param))
+            elif name.startswith("appearance_seg_head."):
+                groups["appearance_head"].append((name, param))
             elif name.startswith("router."):
                 groups["router"].append((name, param))
             elif name.startswith(("geometry_head.", "ray_tokens.", "geometry_visual_proj.")):
@@ -174,7 +187,7 @@ class DHGAStageTrainer:
         trainable = {group: [(name, param) for name, param in items if param.requires_grad] for group, items in groups.items()}
         stage = self.config.dhga_stage
         required = {
-            "B": ("semantic_lora", "appearance_expert", "router"),
+            "B": ("semantic_lora", "appearance_expert", "router") if self.config.dhga_stage_b_method == "legacy" else ("semantic_lora", "appearance_expert", "appearance_head"),
             "C": ("geometry",),
             "D": ("router", "geometry"),
         }.get(stage, ())
@@ -187,6 +200,8 @@ class DHGAStageTrainer:
             )
         if stage == "B" and trainable["geometry"]:
             raise RuntimeError("Stage B unexpectedly enables geometry parameters")
+        if stage == "B" and self.config.dhga_stage_b_method == "prototype_v4" and trainable["router"]:
+            raise RuntimeError("Stage B v4 unexpectedly enables router parameters")
         if stage in {"C", "D"} and (trainable["semantic_lora"] or trainable["appearance_expert"]):
             raise RuntimeError(f"Stage {stage} unexpectedly enables region-expert parameters")
 
@@ -215,7 +230,9 @@ class DHGAStageTrainer:
 
     def _validate_required_gradient_flow(self, metrics: dict[str, float]) -> None:
         required = {
-            "B": ("semantic_lora", "appearance_expert", "router"),
+            "B": ("semantic_lora", "appearance_expert", "router")
+            if self.config.dhga_stage_b_method == "legacy"
+            else (("appearance_expert", "appearance_head") if self.stage_b_v4_phase == "bootstrap" else ("semantic_lora", "appearance_expert", "appearance_head")),
             "C": ("geometry",),
             "D": ("router", "geometry"),
         }.get(self.config.dhga_stage, ())
@@ -248,6 +265,17 @@ class DHGAStageTrainer:
             param.requires_grad_(False)
         stage = self.config.dhga_stage
         if stage == "B":
+            if self.config.dhga_stage_b_method == "prototype_v4":
+                if self.stage_b_v4_phase == "adapt":
+                    for module in self.model.injected_lora.values():
+                        for name, param in module.named_parameters():
+                            if not name.startswith("base."):
+                                param.requires_grad_(True)
+                for param in self.model.appearance_expert.parameters():
+                    param.requires_grad_(True)
+                for param in self.model.appearance_seg_head.parameters():
+                    param.requires_grad_(True)
+                return
             for module in self.model.injected_lora.values():
                 for name, param in module.named_parameters():
                     if not name.startswith("base."):
@@ -365,6 +393,14 @@ class DHGAStageTrainer:
         self.model.train()
         try:
             for epoch in tqdm(range(self.start_epoch, self.config.epochs), desc=f"DHGA Stage {self.config.dhga_stage}", dynamic_ncols=True):
+                self.current_epoch = epoch + 1
+                if self.config.dhga_stage == "B" and self.config.dhga_stage_b_method == "prototype_v4":
+                    self.stage_b_v4_phase = "bootstrap" if (epoch + 1) <= self.config.dhga_stage_b_v4_bootstrap_epochs else "adapt"
+                    if epoch + 1 == 1:
+                        print(
+                            "Stage B prototype_v4 enabled: ignoring legacy anchor/appearance-expansion/"
+                            "weak-strong/cross-supervision/router-target/global-entropy/EMA-teacher losses."
+                        )
                 random.shuffle(train_paths)
                 if self.config.dhga_stage == "B":
                     epoch_total = len(train_paths) * self._stage_b_patches_per_case()
@@ -377,7 +413,7 @@ class DHGAStageTrainer:
                         patch_size = tuple(int(v) for v in self.predictor.patch_size)
                         slicers = self.predictor._internal_get_sliding_window_slicers(volume.shape[1:])
                         random.shuffle(slicers)
-                        if self.config.dhga_stage == "B":
+                        if self.config.dhga_stage == "B" and self.config.dhga_stage_b_method == "legacy":
                             selected_slicers = self._stage_b_anchor_guided_slicers(path, volume, spacing, slicers)
                         else:
                             if self.config.dhga_stage in {"C", "D"}:
@@ -394,6 +430,18 @@ class DHGAStageTrainer:
                                 self._set_stage_trainability()
                                 with torch.autocast(self.device.type, enabled=self.config.amp and self.device.type == "cuda"):
                                     loss, metrics = self.training_step(patch, spacing=spacing)
+                                if metrics.get("dhga_skip_optimizer_step", 0.0) > 0.0:
+                                    self.stage_b_v4_skipped_updates += 1
+                                    self.global_step += 1
+                                    record = {"epoch": epoch + 1, "case": str(path), **metrics}
+                                    record["patch_kind"] = patch_kind
+                                    history.append(record)
+                                    epoch_records.append(record)
+                                    log_step = self.global_step
+                                    self._log_tensorboard_scalars(metrics, log_step)
+                                    patch_bar.set_postfix({"loss": "skip", "kind": patch_kind, "case": Path(path).name[:18]})
+                                    patch_bar.update(1)
+                                    continue
                                 self.optimizer.zero_grad(set_to_none=True)
                                 self.scaler.scale(loss).backward()
                                 self.scaler.unscale_(self.optimizer)
@@ -415,6 +463,8 @@ class DHGAStageTrainer:
                             patch_bar.set_postfix({"loss": f"{float(metrics.get('loss', 0.0)):.4f}", "kind": patch_kind, "case": Path(path).name[:18]})
                             patch_bar.update(1)
                 epoch_metrics = self._log_epoch_metrics(epoch + 1, epoch_records)
+                if self.config.dhga_stage == "B" and self.config.dhga_stage_b_method == "prototype_v4" and self.stage_b_v4_phase == "bootstrap":
+                    self._finalize_stage_b_v4_bootstrap(epoch + 1)
                 if self.config.dhga_stage in {"B", "C"} and (epoch + 1) % self.config.dhga_validation_interval_epochs == 0:
                     self._run_periodic_test_evaluation(epoch + 1, epoch_metrics)
         finally:
@@ -645,7 +695,8 @@ class DHGAStageTrainer:
             predictor=self.predictor,
         )
         try:
-            metrics = evaluator.evaluate_split("test", 0)
+            eval_max_cases = self.config.max_cases if (self.config.dhga_stage == "B" and self.config.dhga_stage_b_method == "prototype_v4") else 0
+            metrics = evaluator.evaluate_split("test", eval_max_cases)
         finally:
             self.model.train(was_training)
         if self.writer is not None:
@@ -702,6 +753,8 @@ class DHGAStageTrainer:
         if stage == "A":
             return self._stage_a(patch, spacing)
         if stage == "B":
+            if self.config.dhga_stage_b_method == "prototype_v4":
+                return self._stage_b_v4(patch, spacing)
             return self._stage_b(patch, spacing)
         if stage == "C":
             recovery, minimal, metrics = self._stage_c(patch, spacing)
@@ -830,6 +883,176 @@ class DHGAStageTrainer:
             "dhga_router_target_loss": float(router_loss.detach().cpu()),
         })
         return loss, metrics
+
+    def _stage_b_v4(self, patch: Tensor, spacing: tuple[float, float, float]) -> tuple[Tensor, dict[str, float]]:
+        if self.stage_b_v4_phase == "bootstrap":
+            return self._stage_b_v4_bootstrap(patch, spacing)
+        return self._stage_b_v4_adapt(patch, spacing)
+
+    def _stage_b_v4_bootstrap(self, patch: Tensor, spacing: tuple[float, float, float]) -> tuple[Tensor, dict[str, float]]:
+        # 只训练：Appearance Adapter和AppearanceSegHead。
+        before_encoder_calls = int(getattr(self.model, "encoder_calls", 0))
+        before_decoder_calls = int(getattr(self.model, "text_decoder_calls", 0))
+        out = self.model.forward_stage_b_v4(patch, spacing, compute_anchor=True)
+        anchor = out.anchor_prob.detach()
+        fg_seed = anchor >= 0.95 # 原始VoxTell zero-shot产生高置信种子
+        bg_seed = anchor <= 0.05
+        weight = self._balanced_seed_weight(fg_seed, bg_seed, anchor.shape, patch.device)
+        loss = balanced_masked_bce(out.appearance_prob, fg_seed.float(), weight)
+        self._collect_stage_b_v4_samples(out, fg_seed, bg_seed)
+        metrics = self._stage_b_v4_common_metrics(out, prefix="bootstrap")
+        metrics.update({
+            "loss": float(loss.detach().cpu()),
+            "dhga_stage_b_v4_phase_bootstrap": 1.0,
+            "dhga_stage_b_v4_phase_adapt": 0.0,
+            "bootstrap_fg_voxels": int(fg_seed.sum().detach().cpu()),
+            "bootstrap_bg_voxels": int(bg_seed.sum().detach().cpu()),
+            "dhga_stage_b_v4_encoder_calls_per_forward": float(int(getattr(self.model, "encoder_calls", 0)) - before_encoder_calls),
+            "dhga_stage_b_v4_text_decoder_calls_per_forward": float(int(getattr(self.model, "text_decoder_calls", 0)) - before_decoder_calls),
+            "dhga_legacy_losses_ignored": 1.0,
+        })
+        return loss, metrics
+
+    def _stage_b_v4_adapt(self, patch: Tensor, spacing: tuple[float, float, float]) -> tuple[Tensor, dict[str, float]]:
+        before_encoder_calls = int(getattr(self.model, "encoder_calls", 0))
+        before_decoder_calls = int(getattr(self.model, "text_decoder_calls", 0))
+        out = self.model.forward_stage_b_v4(patch, spacing, compute_anchor=False)
+        v4 = out.v4 or {}
+        q_sem = v4["q_sem"].detach()
+        q_app = v4["q_app"].detach()
+        sem_prob = v4["semantic_prob_lowres"]
+        app_prob = v4["appearance_prob_lowres"]
+        masks = make_reliability_masks(
+            q_sem,
+            q_app,
+            sem_prob.detach(),
+            app_prob.detach(),
+            high=self.config.dhga_stage_b_v4_reliable_high,
+            low=self.config.dhga_stage_b_v4_reliable_low,
+        )
+        sem_loss = stage_b_v4_expert_loss(sem_prob, masks.sem_target, masks.sem_weight)
+        app_loss = stage_b_v4_expert_loss(app_prob, masks.app_target, masks.app_weight)
+        loss = sem_loss + app_loss
+        active = bool((masks.sem_weight > 0).any().detach().cpu() or (masks.app_weight > 0).any().detach().cpu())
+        metrics = self._stage_b_v4_mask_metrics(masks)
+        metrics.update(self._stage_b_v4_common_metrics(out, prefix="adapt"))
+        metrics.update({
+            "loss": float(loss.detach().cpu()),
+            "dhga_stage_b_v4_sem_loss": float(sem_loss.detach().cpu()),
+            "dhga_stage_b_v4_app_loss": float(app_loss.detach().cpu()),
+            "dhga_stage_b_v4_phase_bootstrap": 0.0,
+            "dhga_stage_b_v4_phase_adapt": 1.0,
+            "dhga_skip_optimizer_step": 0.0 if active else 1.0,
+            "dhga_stage_b_v4_encoder_calls_per_forward": float(int(getattr(self.model, "encoder_calls", 0)) - before_encoder_calls),
+            "dhga_stage_b_v4_text_decoder_calls_per_forward": float(int(getattr(self.model, "text_decoder_calls", 0)) - before_decoder_calls),
+            "dhga_legacy_losses_ignored": 1.0,
+        })
+        if active and int(getattr(self, "current_epoch", 0)) >= 3:
+            with torch.no_grad():
+                joint_label = (q_sem >= 0.5).float()
+                self.model.prototype_bank.ema_update_nearest("semantic", v4["semantic_feature"], joint_label, masks.joint)
+                self.model.prototype_bank.ema_update_nearest("appearance", v4["appearance_feature"], joint_label, masks.joint)
+        metrics.update(self._stage_b_v4_prototype_metrics())
+        return loss, metrics
+
+    def _balanced_seed_weight(self, fg: Tensor, bg: Tensor, shape: torch.Size, device: torch.device) -> Tensor:
+        weight = torch.zeros(shape, device=device, dtype=torch.float32)
+        limit = int(self.config.dhga_stage_b_v4_seed_sample_voxels)
+        for mask, value in ((fg, 1.0), (bg, 1.0)):
+            coords = mask.flatten().nonzero(as_tuple=False).flatten()
+            if coords.numel() == 0:
+                continue
+            if coords.numel() > limit:
+                generator = torch.Generator(device=device)
+                generator.manual_seed(int(self.config.seed) + int(self.global_step))
+                coords = coords[torch.randperm(coords.numel(), generator=generator, device=device)[:limit]]
+            weight.flatten()[coords] = value
+        return weight
+
+    def _collect_stage_b_v4_samples(self, out, fg_seed: Tensor, bg_seed: Tensor) -> None:
+        if out.v4 is None:
+            return
+        self._collect_feature_samples("semantic_fg", out.v4["semantic_feature"], fg_seed)
+        self._collect_feature_samples("semantic_bg", out.v4["semantic_feature"], bg_seed)
+        self._collect_feature_samples("appearance_fg", out.v4["appearance_feature"], fg_seed)
+        self._collect_feature_samples("appearance_bg", out.v4["appearance_feature"], bg_seed)
+
+    def _collect_feature_samples(self, key: str, feature: Tensor, mask: Tensor) -> None:
+        mask_low = F.interpolate(mask.float(), size=tuple(feature.shape[-3:]), mode="nearest") > 0.5
+        coords = mask_low[:, 0].flatten().nonzero(as_tuple=False).flatten()
+        if coords.numel() == 0:
+            return
+        per_patch = min(int(self.config.dhga_stage_b_v4_seed_sample_voxels), int(coords.numel()))
+        generator = torch.Generator(device=feature.device)
+        generator.manual_seed(int(self.config.seed) + int(self.global_step) + len(self.stage_b_v4_samples[key]))
+        coords = coords[torch.randperm(coords.numel(), generator=generator, device=feature.device)[:per_patch]]
+        samples = feature.detach().permute(0, 2, 3, 4, 1).reshape(-1, feature.shape[1])[coords].float().cpu()
+        current = self.stage_b_v4_samples[key]
+        current.append(samples)
+        total = sum(item.shape[0] for item in current)
+        limit = int(self.config.dhga_stage_b_v4_proto_sample_limit)
+        while total > limit and current:
+            removed = current.pop(0)
+            total -= removed.shape[0]
+
+    def _finalize_stage_b_v4_bootstrap(self, epoch: int) -> None:
+        samples = {}
+        for key, parts in self.stage_b_v4_samples.items():
+            samples[key] = torch.cat(parts, dim=0) if parts else torch.zeros((0, 1))
+        sem_fg = samples["semantic_fg"]
+        sem_bg = samples["semantic_bg"]
+        app_fg = samples["appearance_fg"]
+        app_bg = samples["appearance_bg"]
+        if sem_fg.numel() == 0 or app_fg.numel() == 0:
+            warning = (
+                f"Stage B v4 bootstrap epoch {epoch} produced no reliable foreground prototype samples: "
+                f"semantic_fg={sem_fg.shape[0] if sem_fg.ndim == 2 else 0}, appearance_fg={app_fg.shape[0] if app_fg.ndim == 2 else 0}. "
+                "Stopping before prototype adaptation."
+            )
+            print(warning)
+            raise RuntimeError(warning)
+        self.model.prototype_bank.initialize_view("semantic", sem_fg, sem_bg, seed=self.config.seed)
+        self.model.prototype_bank.initialize_view("appearance", app_fg, app_bg, seed=self.config.seed + 101)
+        print(json.dumps({"stage_b_v4_prototypes": self.model.prototype_bank.valid_counts()}, indent=2))
+
+    def _stage_b_v4_prototype_metrics(self) -> dict[str, float]:
+        counts = self.model.prototype_bank.valid_counts()
+        metrics = {f"prototype_valid_{key}": float(value) for key, value in counts.items()}
+        assignment = self.model.prototype_bank.assignment_count.detach().cpu()
+        for row_idx, row_name in enumerate(("semantic_fg", "semantic_bg", "appearance_fg", "appearance_bg")):
+            for proto_idx, value in enumerate(assignment[row_idx].tolist()):
+                metrics[f"prototype_assignment_{row_name}_{proto_idx}"] = float(value)
+        metrics["dhga_stage_b_v4_skipped_updates_total"] = float(self.stage_b_v4_skipped_updates)
+        return metrics
+
+    def _stage_b_v4_mask_metrics(self, masks) -> dict[str, float]:
+        total = float(masks.reject.numel())
+        return {
+            "joint_fg_ratio": float(masks.joint_fg.float().mean().detach().cpu()),
+            "joint_bg_ratio": float(masks.joint_bg.float().mean().detach().cpu()),
+            "joint_strong_ratio": float(masks.joint.float().mean().detach().cpu()),
+            "semantic_only_ratio": float(masks.semantic_only.float().mean().detach().cpu()),
+            "appearance_only_ratio": float(masks.appearance_only.float().mean().detach().cpu()),
+            "conflict_ratio": float(masks.conflict.float().mean().detach().cpu()),
+            "reject_ratio": float(masks.reject.float().mean().detach().cpu()),
+        }
+
+    def _stage_b_v4_common_metrics(self, out, prefix: str) -> dict[str, float]:
+        sem = out.semantic_prob.detach().float()
+        app = out.appearance_prob.detach().float()
+        fused = out.final_prob.detach().float()
+        candidate = (sem > 0.1) | (app > 0.1) | (fused > 0.1)
+        metrics = {
+            f"{prefix}_semantic_app_corr_all": float(tensor_corr(sem, app).cpu()),
+            f"{prefix}_semantic_app_corr_candidate": float(tensor_corr(sem, app, candidate).cpu()),
+            f"{prefix}_semantic_pred_volume": float((sem >= self.config.pred_threshold).float().mean().cpu()),
+            f"{prefix}_appearance_pred_volume": float((app >= self.config.pred_threshold).float().mean().cpu()),
+            f"{prefix}_prototype_fusion_pred_volume": float((fused >= self.config.pred_threshold).float().mean().cpu()),
+            f"{prefix}_mean_fusion_pred_volume": float((((sem + app) * 0.5) >= self.config.pred_threshold).float().mean().cpu()),
+            f"{prefix}_semantic_appearance_abs_delta": float((sem - app).abs().mean().cpu()),
+        }
+        metrics.update(self._stage_b_v4_prototype_metrics())
+        return metrics
 
     def _stage_c(
         self,

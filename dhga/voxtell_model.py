@@ -24,6 +24,7 @@ from dhga.geometry import (
 )
 from dhga.routing import DisagreementRouter, RouterOutput
 from dhga.shared_voxtell import SharedVoxTellFeatures, freeze_module, trainable_parameter_summary
+from dhga.stage_b_v4 import AppearanceSegHead, TargetPrototypeBank, prototype_reliability_fusion
 from voxtell_sfda.adapter import build_prompt_variants, load_prompts, prepare_voxtell_import
 from voxtell_sfda.lora import inject_lora_into_voxtell_decoder, mark_only_lora_trainable
 
@@ -39,6 +40,7 @@ class DHGAForwardOutput:
     geometry: dict[str, Tensor]
     final_prob: Tensor
     features: SharedVoxTellFeatures
+    v4: dict[str, Tensor] | None = None
 
 
 class PromptConditionedRayTokens(nn.Module):
@@ -101,6 +103,7 @@ class DHGAVoxTellModel(nn.Module):
         self.num_templates = num_templates
         self.register_buffer("text_embeddings", text_embeddings.detach().clone(), persistent=False)
         self.encoder_calls = 0
+        self.text_decoder_calls = 0
         self._printed_encoder_plan = False
         if config.dhga_freeze_voxtell:
             freeze_module(self.network)
@@ -113,11 +116,28 @@ class DHGAVoxTellModel(nn.Module):
         )
         mark_only_lora_trainable(self.network)
         channels = self._infer_encoder_channels()
+        selected_feature_idx = int(getattr(self.network, "selected_decoder_layer", len(channels) - 1))
+        if selected_feature_idx < 0:
+            selected_feature_idx += len(channels)
+        if selected_feature_idx < 0 or selected_feature_idx >= len(channels):
+            selected_feature_idx = len(channels) - 1
+        self.semantic_prototype_feature_idx = selected_feature_idx
         self.appearance_expert = AppearanceExpert(
             channels,
             config.dhga_appearance_feature_layers,
             config.dhga_appearance_hidden_ratio,
             config.dhga_appearance_feature_dropout,
+        )
+        self.appearance_seg_head = AppearanceSegHead(
+            channels,
+            config.dhga_appearance_feature_layers,
+            proj_channels=config.dhga_stage_b_v4_head_channels,
+            max_fusion_voxels=config.dhga_stage_b_v4_max_fusion_voxels,
+        )
+        self.prototype_bank = TargetPrototypeBank(
+            semantic_dim=channels[self.semantic_prototype_feature_idx],
+            appearance_dim=config.dhga_stage_b_v4_head_channels,
+            tau=config.dhga_stage_b_v4_proto_tau,
         )
         self.router = DisagreementRouter(config.dhga_router_normalization)
         self.ray_offsets_mm = make_ray_offsets_mm(config.dhga_search_radius_mm, config.dhga_ray_step_mm)
@@ -224,6 +244,78 @@ class DHGAVoxTellModel(nn.Module):
             geometry=geometry,
             final_prob=final_prob,
             features=features,
+            v4=None,
+        )
+
+    def forward_stage_b_v4(
+        self,
+        image: Tensor,
+        spacing: tuple[float, float, float] = (1.0, 1.0, 1.0),
+        compute_anchor: bool = False,
+    ) -> DHGAForwardOutput:
+        features = self.encode_once(image, spacing)
+        semantic_logits, _ = self.decode_from_features(features.encoder_stages, features.selected_feature)
+        sem_prob = self._class_probs(semantic_logits)
+        app_features = self.appearance_expert.adapt_features(features, self.config.dhga_appearance_feature_dropout)
+        app_head = self.appearance_seg_head(app_features.encoder_stages, tuple(semantic_logits.shape[-3:]))
+        app_logits = app_head["appearance_logits"]
+        app_prob = app_logits.float().sigmoid()
+        anchor_prob = torch.full_like(sem_prob, 0.5)
+        if compute_anchor:
+            with torch.no_grad(), self.lora_disabled(), self.appearance_disabled():
+                anchor_logits, _ = self.decode_from_features(features.encoder_stages, features.selected_feature)
+                anchor_prob = self._class_probs(anchor_logits)
+        proto_grid = tuple(app_head["appearance_feature"].shape[-3:])
+        sem_proto_feature = features.encoder_stages[self.semantic_prototype_feature_idx]
+        if tuple(sem_proto_feature.shape[-3:]) != proto_grid:
+            sem_proto_feature = F.interpolate(sem_proto_feature, size=proto_grid, mode="trilinear", align_corners=False)
+        sem_low = F.interpolate(sem_prob, size=proto_grid, mode="trilinear", align_corners=False)
+        app_low = app_head["appearance_logits_lowres"].float().sigmoid()
+        q_sem, c_sem = self.prototype_bank.prototype_probability("semantic", sem_proto_feature)
+        q_app, c_app = self.prototype_bank.prototype_probability("appearance", app_head["appearance_feature"])
+        fusion = prototype_reliability_fusion(sem_low, app_low, q_sem, q_app)
+        final_low = fusion["fused_prob"]
+        final_prob = F.interpolate(final_low, size=tuple(semantic_logits.shape[-3:]), mode="trilinear", align_corners=False)
+        zero = torch.zeros_like(final_prob)
+        router = RouterOutput(
+            stable_foreground=zero,
+            stable_background=zero,
+            disagreement=(sem_prob - app_prob).abs().detach(),
+            fused_prob=final_prob,
+            consensus_mask=torch.zeros_like(final_prob, dtype=torch.bool),
+            cross_supervision_weight=zero,
+            geometry_disagreement_weight=fusion["geo_trigger"].detach(),
+            w_sem=F.interpolate(fusion["w_sem"], size=tuple(semantic_logits.shape[-3:]), mode="trilinear", align_corners=False).detach(),
+            w_app=F.interpolate(fusion["w_app"], size=tuple(semantic_logits.shape[-3:]), mode="trilinear", align_corners=False).detach(),
+            w_geo=zero,
+        )
+        v4 = {
+            "semantic_feature": sem_proto_feature,
+            "appearance_feature": app_head["appearance_feature"],
+            "semantic_prob_lowres": sem_low,
+            "appearance_prob_lowres": app_low,
+            "appearance_logits_lowres": app_head["appearance_logits_lowres"],
+            "q_sem": q_sem,
+            "q_app": q_app,
+            "c_sem": c_sem,
+            "c_app": c_app,
+            "prototype_fused_prob_lowres": final_low,
+            "prototype_fused_prob": final_prob,
+            "geo_trigger": fusion["geo_trigger"].detach(),
+            "r_sem": fusion["r_sem"].detach(),
+            "r_app": fusion["r_app"].detach(),
+        }
+        return DHGAForwardOutput(
+            semantic_logits=semantic_logits,
+            appearance_logits=app_logits,
+            semantic_prob=sem_prob,
+            appearance_prob=app_prob,
+            anchor_prob=anchor_prob,
+            router=router,
+            geometry={},
+            final_prob=final_prob,
+            features=features,
+            v4=v4,
         )
 
     def baseline_forward(self, image: Tensor, spacing: tuple[float, float, float] = (1.0, 1.0, 1.0)) -> DHGAForwardOutput:
@@ -260,6 +352,7 @@ class DHGAVoxTellModel(nn.Module):
         )
 
     def decode_from_features(self, skips: list[Tensor], selected_feature: Tensor | None) -> tuple[Tensor, Tensor]:
+        self.text_decoder_calls += 1
         if selected_feature is None:
             selected_feature = skips[-1]
         bottleneck_embed = rearrange(selected_feature, "b c d h w -> b h w d c")
@@ -489,9 +582,11 @@ class DHGAVoxTellModel(nn.Module):
             {
                 "dhga.semantic_lora": self.network,
                 "dhga.appearance_expert": self.appearance_expert,
+                "dhga.appearance_seg_head": self.appearance_seg_head,
                 "dhga.router": self.router,
                 "dhga.geometry_head": self.geometry_head,
                 "dhga.ray_tokens": self.ray_tokens,
+                "dhga.prototype_bank": self.prototype_bank,
             }
         )
 

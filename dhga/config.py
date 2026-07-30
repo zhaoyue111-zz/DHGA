@@ -27,8 +27,17 @@ class DHGAConfig:
     tensorboard_enabled: bool = True
     tensorboard_log_interval: int = 1
     tensorboard_image_interval: int = 50
+    dhga_stage_b_method: str = "legacy"
     dhga_stage_b_anchor_candidate_patches: int = 24
     dhga_stage_b_include_background_patch: bool = True
+    dhga_stage_b_v4_bootstrap_epochs: int = 1
+    dhga_stage_b_v4_head_channels: int = 16
+    dhga_stage_b_v4_max_fusion_voxels: int = 64 * 64 * 64
+    dhga_stage_b_v4_seed_sample_voxels: int = 2048
+    dhga_stage_b_v4_proto_sample_limit: int = 8192
+    dhga_stage_b_v4_proto_tau: float = 0.1
+    dhga_stage_b_v4_reliable_high: float = 0.8
+    dhga_stage_b_v4_reliable_low: float = 0.2
     dhga_validation_interval_epochs: int = 2
     init_checkpoint: str = ""
     resume_checkpoint: str = ""
@@ -87,8 +96,24 @@ class DHGAConfig:
             raise ValueError("lr must be positive")
         if self.tensorboard_log_interval <= 0 or self.tensorboard_image_interval <= 0:
             raise ValueError("tensorboard intervals must be positive")
+        if self.dhga_stage_b_method not in {"legacy", "prototype_v4"}:
+            raise ValueError("dhga_stage_b_method must be legacy or prototype_v4")
         if self.dhga_stage_b_anchor_candidate_patches <= 0:
             raise ValueError("dhga_stage_b_anchor_candidate_patches must be positive")
+        if self.dhga_stage_b_v4_bootstrap_epochs < 0:
+            raise ValueError("dhga_stage_b_v4_bootstrap_epochs must be non-negative")
+        if self.dhga_stage_b_v4_head_channels <= 0:
+            raise ValueError("dhga_stage_b_v4_head_channels must be positive")
+        if self.dhga_stage_b_v4_max_fusion_voxels <= 0:
+            raise ValueError("dhga_stage_b_v4_max_fusion_voxels must be positive")
+        if self.dhga_stage_b_v4_seed_sample_voxels <= 0 or self.dhga_stage_b_v4_proto_sample_limit <= 0:
+            raise ValueError("Stage B v4 sample limits must be positive")
+        if self.dhga_stage_b_v4_proto_tau <= 0:
+            raise ValueError("dhga_stage_b_v4_proto_tau must be positive")
+        if not 0.5 < self.dhga_stage_b_v4_reliable_high < 1.0:
+            raise ValueError("dhga_stage_b_v4_reliable_high must be in (0.5, 1)")
+        if not 0.0 < self.dhga_stage_b_v4_reliable_low < 0.5:
+            raise ValueError("dhga_stage_b_v4_reliable_low must be in (0, 0.5)")
         if self.dhga_validation_interval_epochs <= 0:
             raise ValueError("dhga_validation_interval_epochs must be positive")
         if self.dhga_semantic_adapter_rank <= 0:
