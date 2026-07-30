@@ -21,6 +21,7 @@ from .losses import boundary_recovery_loss, cross_supervision_loss, diagnostics_
 from .routing import DisagreementRouter
 from .shared_voxtell import SharedEncoderOnce, trainable_parameter_summary
 from .teacher import EMATeacher
+from .text_layer_ensemble import text_layer_training_loss
 from .voxtell_model import DHGAVoxTellModel, build_dhga_voxtell_model
 from voxtell_sfda.adapter import load_split_manifest, random_slicer, set_seed
 
@@ -174,7 +175,7 @@ class DHGAStageTrainer:
         trainable = {group: [(name, param) for name, param in items if param.requires_grad] for group, items in groups.items()}
         stage = self.config.dhga_stage
         required = {
-            "B": ("semantic_lora", "appearance_expert", "router"),
+            "B": ("semantic_lora", "appearance_expert") if self.config.dhga_stage_b_method == "text_layer_ensemble" else ("semantic_lora", "appearance_expert", "router"),
             "C": ("geometry",),
             "D": ("router", "geometry"),
         }.get(stage, ())
@@ -215,7 +216,7 @@ class DHGAStageTrainer:
 
     def _validate_required_gradient_flow(self, metrics: dict[str, float]) -> None:
         required = {
-            "B": ("semantic_lora", "appearance_expert", "router"),
+            "B": ("semantic_lora", "appearance_expert") if self.config.dhga_stage_b_method == "text_layer_ensemble" else ("semantic_lora", "appearance_expert", "router"),
             "C": ("geometry",),
             "D": ("router", "geometry"),
         }.get(self.config.dhga_stage, ())
@@ -254,8 +255,9 @@ class DHGAStageTrainer:
                         param.requires_grad_(True)
             for param in self.model.appearance_expert.parameters():
                 param.requires_grad_(True)
-            for param in self.model.router.parameters():
-                param.requires_grad_(True)
+            if self.config.dhga_stage_b_method == "legacy":
+                for param in self.model.router.parameters():
+                    param.requires_grad_(True)
         elif stage == "C":
             for param in self.model.geometry_head.parameters():
                 param.requires_grad_(True)
@@ -366,7 +368,7 @@ class DHGAStageTrainer:
         try:
             for epoch in tqdm(range(self.start_epoch, self.config.epochs), desc=f"DHGA Stage {self.config.dhga_stage}", dynamic_ncols=True):
                 random.shuffle(train_paths)
-                if self.config.dhga_stage == "B":
+                if self.config.dhga_stage == "B" and self.config.dhga_stage_b_method == "legacy":
                     epoch_total = len(train_paths) * self._stage_b_patches_per_case()
                 else:
                     epoch_total = len(train_paths) * self.config.steps_per_volume if self.config.steps_per_volume > 0 else None
@@ -377,7 +379,7 @@ class DHGAStageTrainer:
                         patch_size = tuple(int(v) for v in self.predictor.patch_size)
                         slicers = self.predictor._internal_get_sliding_window_slicers(volume.shape[1:])
                         random.shuffle(slicers)
-                        if self.config.dhga_stage == "B":
+                        if self.config.dhga_stage == "B" and self.config.dhga_stage_b_method == "legacy":
                             selected_slicers = self._stage_b_anchor_guided_slicers(path, volume, spacing, slicers)
                         else:
                             if self.config.dhga_stage in {"C", "D"}:
@@ -702,6 +704,8 @@ class DHGAStageTrainer:
         if stage == "A":
             return self._stage_a(patch, spacing)
         if stage == "B":
+            if self.config.dhga_stage_b_method == "text_layer_ensemble":
+                return self._stage_b_text_layer_ensemble(patch, spacing)
             return self._stage_b(patch, spacing)
         if stage == "C":
             recovery, minimal, metrics = self._stage_c(patch, spacing)
@@ -750,6 +754,36 @@ class DHGAStageTrainer:
         metrics = diagnostics_from_probs(out.semantic_prob, out.appearance_prob, out.router)
         metrics["dhga_stage_a_anchor_delta"] = float((out.semantic_prob - out.anchor_prob).abs().mean().detach().cpu())
         metrics["dhga_stage_a_forced_baseline"] = 1.0
+        metrics["loss"] = float(loss.detach().cpu())
+        return loss, metrics
+
+    def _stage_b_text_layer_ensemble(self, patch: Tensor, spacing: tuple[float, float, float]) -> tuple[Tensor, dict[str, float]]:
+        before_encoder_calls = int(getattr(self.model, "encoder_calls", 0))
+        out = self.model.forward_text_layer_ensemble(patch, spacing) if hasattr(self.model, "forward_text_layer_ensemble") else self.model(patch, spacing, run_geometry=False)
+        loss, metrics = text_layer_training_loss(out, self.config)
+        ens = out.layer_ensemble or {}
+        sem_layers = ens.get("semantic_layer_probs")
+        app_layers = ens.get("appearance_layer_probs")
+        if isinstance(sem_layers, Tensor):
+            for idx in range(sem_layers.shape[0]):
+                metrics[f"dhga_text_layer_semantic_layer_{idx}_fg_ratio"] = float((sem_layers[idx] >= self.config.pred_threshold).float().mean().detach().cpu())
+        if isinstance(app_layers, Tensor):
+            for idx in range(app_layers.shape[0]):
+                metrics[f"dhga_text_layer_appearance_layer_{idx}_fg_ratio"] = float((app_layers[idx] >= self.config.pred_threshold).float().mean().detach().cpu())
+        for prefix, tensor in (("u_sem", ens.get("semantic_u_layer")), ("u_app", ens.get("appearance_u_layer"))):
+            if isinstance(tensor, Tensor):
+                values = tensor.detach().float().flatten()
+                metrics[f"dhga_text_layer_{prefix}_mean"] = float(values.mean().cpu()) if values.numel() else 0.0
+                metrics[f"dhga_text_layer_{prefix}_p90"] = float(torch.quantile(values, 0.9).cpu()) if values.numel() else 0.0
+        for key in ("semantic_p_last", "appearance_p_last", "semantic_p_mean", "appearance_p_mean", "p_base", "p_final"):
+            value = ens.get(key)
+            if isinstance(value, Tensor):
+                metrics[f"dhga_text_layer_{key}_pred_volume"] = float((value >= self.config.pred_threshold).float().mean().detach().cpu())
+        metrics["dhga_text_layer_base_to_enhanced_abs_delta"] = float((ens["p_final"] - ens["p_base"]).abs().mean().detach().cpu()) if "p_final" in ens and "p_base" in ens else 0.0
+        metrics["dhga_text_layer_encoder_calls_per_forward"] = float(int(getattr(self.model, "encoder_calls", 0)) - before_encoder_calls)
+        metrics["dhga_text_layer_method_enabled"] = 1.0
+        metrics["dhga_text_layer_legacy_anchor_loss_active"] = 0.0
+        metrics["dhga_text_layer_legacy_router_loss_active"] = 0.0
         metrics["loss"] = float(loss.detach().cpu())
         return loss, metrics
 

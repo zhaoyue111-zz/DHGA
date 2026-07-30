@@ -24,6 +24,7 @@ from dhga.geometry import (
 )
 from dhga.routing import DisagreementRouter, RouterOutput
 from dhga.shared_voxtell import SharedVoxTellFeatures, freeze_module, trainable_parameter_summary
+from dhga.text_layer_ensemble import fuse_text_layer_ensemble, summarize_layer_probs
 from voxtell_sfda.adapter import build_prompt_variants, load_prompts, prepare_voxtell_import
 from voxtell_sfda.lora import inject_lora_into_voxtell_decoder, mark_only_lora_trainable
 
@@ -39,6 +40,7 @@ class DHGAForwardOutput:
     geometry: dict[str, Tensor]
     final_prob: Tensor
     features: SharedVoxTellFeatures
+    layer_ensemble: dict[str, Tensor] | None = None
 
 
 class PromptConditionedRayTokens(nn.Module):
@@ -186,6 +188,8 @@ class DHGAVoxTellModel(nn.Module):
             self.appearance_expert.train(old_training)
 
     def forward(self, image: Tensor, spacing: tuple[float, float, float] = (1.0, 1.0, 1.0), run_geometry: bool = True) -> DHGAForwardOutput:
+        if self.config.dhga_stage_b_method == "text_layer_ensemble" and self.config.dhga_stage == "B":
+            return self.forward_text_layer_ensemble(image, spacing)
         features = self.encode_once(image, spacing)
         if not self.config.dhga_enabled:
             return self.baseline_forward_from_features(features)
@@ -226,6 +230,62 @@ class DHGAVoxTellModel(nn.Module):
             features=features,
         )
 
+    def forward_text_layer_ensemble(self, image: Tensor, spacing: tuple[float, float, float] = (1.0, 1.0, 1.0)) -> DHGAForwardOutput:
+        features = self.encode_once(image, spacing)
+        semantic_logits, projected_prompt, semantic_layers = self.decode_from_features(
+            features.encoder_stages,
+            features.selected_feature,
+            return_all_layers=True,
+        )
+        with self.lora_disabled():
+            app_features = self.appearance_expert.adapt_features(features, self.config.dhga_appearance_feature_dropout)
+            appearance_logits, _projected_unused, appearance_layers = self.decode_from_features(
+                app_features.encoder_stages,
+                app_features.selected_feature,
+                return_all_layers=True,
+            )
+        semantic_prob = self._class_probs(semantic_logits)
+        appearance_prob = self._class_probs(appearance_logits)
+        target_shape = tuple(semantic_prob.shape[-3:])
+        semantic_summary = summarize_layer_probs([self._class_probs(logits) for logits in semantic_layers], self.config, target_shape)
+        appearance_summary = summarize_layer_probs([self._class_probs(logits) for logits in appearance_layers], self.config, target_shape)
+        fused = fuse_text_layer_ensemble(semantic_summary, appearance_summary, self.config)
+        disagreement = (semantic_summary["p_mean"] - appearance_summary["p_mean"]).abs().clamp(0, 1)
+        router = RouterOutput(
+            stable_foreground=fused["reliable_fg"],
+            stable_background=fused["reliable_bg"],
+            disagreement=disagreement,
+            fused_prob=fused["p_final"],
+            consensus_mask=(fused["reliable_fg"] + fused["reliable_bg"]).clamp(0, 1),
+            cross_supervision_weight=torch.zeros_like(fused["p_final"]),
+            geometry_disagreement_weight=fused["candidate_score"].detach(),
+            w_sem=fused["w_sem"],
+            w_app=fused["w_app"],
+            w_geo=torch.zeros_like(fused["p_final"]),
+        )
+        layer_ensemble = {
+            **{f"semantic_{key}": value for key, value in semantic_summary.items()},
+            **{f"appearance_{key}": value for key, value in appearance_summary.items()},
+            **fused,
+            "semantic_p_mean": semantic_summary["p_mean"],
+            "appearance_p_mean": appearance_summary["p_mean"],
+            "semantic_p_last": semantic_summary["p_last"],
+            "appearance_p_last": appearance_summary["p_last"],
+            "candidate_map_for_geometry": fused["candidate_score"].detach(),
+        }
+        return DHGAForwardOutput(
+            semantic_logits=semantic_logits,
+            appearance_logits=appearance_logits,
+            semantic_prob=semantic_prob,
+            appearance_prob=appearance_prob,
+            anchor_prob=semantic_prob.detach(),
+            router=router,
+            geometry={},
+            final_prob=fused["p_final"],
+            features=features,
+            layer_ensemble=layer_ensemble,
+        )
+
     def baseline_forward(self, image: Tensor, spacing: tuple[float, float, float] = (1.0, 1.0, 1.0)) -> DHGAForwardOutput:
         return self.baseline_forward_from_features(self.encode_once(image, spacing))
 
@@ -259,7 +319,12 @@ class DHGAVoxTellModel(nn.Module):
             metadata={"selected_feature_idx": selected_idx},
         )
 
-    def decode_from_features(self, skips: list[Tensor], selected_feature: Tensor | None) -> tuple[Tensor, Tensor]:
+    def decode_from_features(
+        self,
+        skips: list[Tensor],
+        selected_feature: Tensor | None,
+        return_all_layers: bool = False,
+    ) -> tuple[Tensor, Tensor] | tuple[Tensor, Tensor, list[Tensor]]:
         if selected_feature is None:
             selected_feature = skips[-1]
         bottleneck_embed = rearrange(selected_feature, "b c d h w -> b h w d c")
@@ -297,7 +362,10 @@ class DHGAVoxTellModel(nn.Module):
                 scale_outs = run_decoder(*skips, *prompt_embeds)
             outs.append(scale_outs)
         outs = [torch.cat(scale_outs, dim=1) for scale_outs in zip(*outs)]
-        return outs[-1], projected_prompt.permute(1, 0, 2)
+        prompt = projected_prompt.permute(1, 0, 2)
+        if return_all_layers:
+            return outs[-1], prompt, outs
+        return outs[-1], prompt
 
     def run_geometry(
         self,

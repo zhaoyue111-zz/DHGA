@@ -27,6 +27,7 @@ class DHGAConfig:
     tensorboard_enabled: bool = True
     tensorboard_log_interval: int = 1
     tensorboard_image_interval: int = 50
+    dhga_stage_b_method: str = "legacy"
     dhga_stage_b_anchor_candidate_patches: int = 24
     dhga_stage_b_include_background_patch: bool = True
     dhga_validation_interval_epochs: int = 2
@@ -51,6 +52,15 @@ class DHGAConfig:
     dhga_weak_strong_weight: float = 0.5
     dhga_router_target_weight: float = 0.5
     dhga_router_normalization: str = "case_rank"
+    dhga_text_layer_weights: list[float] = field(default_factory=list)
+    dhga_text_layer_temperature: float = 0.1
+    dhga_text_layer_foreground_support_threshold: float = 0.5
+    dhga_text_layer_candidate_max_ratio: float = 0.1
+    dhga_text_layer_candidate_alpha: float = 0.5
+    dhga_text_layer_stability_threshold: float = 0.08
+    dhga_text_layer_reliable_fg_threshold: float = 0.8
+    dhga_text_layer_reliable_bg_threshold: float = 0.2
+    dhga_text_layer_candidate_weight: float = 0.1
     dhga_geometry_enabled: bool = True
     dhga_search_radius_mm: float = 6.0
     dhga_surface_tolerance_mm: float = 1.0
@@ -87,6 +97,8 @@ class DHGAConfig:
             raise ValueError("lr must be positive")
         if self.tensorboard_log_interval <= 0 or self.tensorboard_image_interval <= 0:
             raise ValueError("tensorboard intervals must be positive")
+        if self.dhga_stage_b_method not in {"legacy", "text_layer_ensemble"}:
+            raise ValueError("dhga_stage_b_method must be legacy or text_layer_ensemble")
         if self.dhga_stage_b_anchor_candidate_patches <= 0:
             raise ValueError("dhga_stage_b_anchor_candidate_patches must be positive")
         if self.dhga_validation_interval_epochs <= 0:
@@ -111,6 +123,28 @@ class DHGAConfig:
             raise ValueError("dhga_router_target_weight must be non-negative")
         if self.dhga_router_normalization not in {"case_rank", "none"}:
             raise ValueError("dhga_router_normalization must be case_rank or none")
+        if any(weight < 0 for weight in self.dhga_text_layer_weights):
+            raise ValueError("dhga_text_layer_weights must be non-negative")
+        if self.dhga_text_layer_weights and sum(self.dhga_text_layer_weights) <= 0:
+            raise ValueError("dhga_text_layer_weights must contain a positive sum")
+        if self.dhga_text_layer_temperature <= 0:
+            raise ValueError("dhga_text_layer_temperature must be positive")
+        for name in (
+            "dhga_text_layer_foreground_support_threshold",
+            "dhga_text_layer_candidate_max_ratio",
+            "dhga_text_layer_candidate_alpha",
+            "dhga_text_layer_stability_threshold",
+            "dhga_text_layer_reliable_fg_threshold",
+            "dhga_text_layer_reliable_bg_threshold",
+            "dhga_text_layer_candidate_weight",
+        ):
+            value = float(getattr(self, name))
+            if value < 0:
+                raise ValueError(f"{name} must be non-negative")
+        if self.dhga_text_layer_candidate_max_ratio > 1:
+            raise ValueError("dhga_text_layer_candidate_max_ratio must be <= 1")
+        if not 0 <= self.dhga_text_layer_reliable_bg_threshold < self.dhga_text_layer_reliable_fg_threshold <= 1:
+            raise ValueError("text-layer reliable thresholds must satisfy 0 <= bg < fg <= 1")
         if self.dhga_search_radius_mm <= 0 or self.dhga_ray_step_mm <= 0:
             raise ValueError("ray radius and step must be positive")
         if self.dhga_surface_tolerance_mm <= 0:
@@ -158,4 +192,13 @@ def parse_int_list(values: Iterable[str] | None, default: list[int]) -> list[int
     parsed: list[int] = []
     for value in values:
         parsed.extend(int(item) for item in str(value).replace(",", " ").split())
+    return parsed
+
+
+def parse_float_list(values: Iterable[str] | None, default: list[float]) -> list[float]:
+    if values is None:
+        return list(default)
+    parsed: list[float] = []
+    for value in values:
+        parsed.extend(float(item) for item in str(value).replace(",", " ").split())
     return parsed

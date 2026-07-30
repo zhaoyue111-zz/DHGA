@@ -74,6 +74,12 @@ class DHGAEvaluator:
                 app_pred = getattr(self, "last_appearance_pred", pred)
                 fused_pred = getattr(self, "last_fused_pred", pred)
                 row.update(compute_binary_case_metrics(pred, gt, sem_pred, app_pred))
+                for metric_name, aux_pred in getattr(self, "last_text_layer_preds", {}).items():
+                    aux = _binary_metric_values(aux_pred, gt)
+                    row[f"{metric_name}_dice"] = aux["dice"]
+                    row[f"{metric_name}_iou"] = aux["iou"]
+                    row[f"{metric_name}_precision"] = aux["precision"]
+                    row[f"{metric_name}_recall"] = aux["recall"]
                 row.update(compute_geometry_case_metrics(fused_pred, pred, gt, spacing_from_reader_properties(image_props), self.config.dhga_surface_tolerance_mm))
                 raw_disagreement = getattr(self, "last_raw_disagreement", None)
                 if raw_disagreement is not None:
@@ -117,17 +123,41 @@ class DHGAEvaluator:
         sem_sum = torch.zeros((1, 1, *data.shape[1:]), device=self.device)
         app_sum = torch.zeros_like(sem_sum)
         count = torch.zeros_like(sem_sum)
+        text_layer_sums: dict[str, torch.Tensor] = {}
+        text_candidate_sum = torch.zeros_like(sem_sum)
         visual_sum = None
         self.model.eval()
         with torch.no_grad():
             for slicer in slicers:
                 patch = torch.clone(data_t[(slice(None), *slicer)], memory_format=torch.contiguous_format)
-                out = self.model(patch, spacing, run_geometry=False)
+                if self.config.dhga_stage == "B" and self.config.dhga_stage_b_method == "text_layer_ensemble" and hasattr(self.model, "forward_text_layer_ensemble"):
+                    out = self.model.forward_text_layer_ensemble(patch, spacing)
+                else:
+                    out = self.model(patch, spacing, run_geometry=False)
                 target_shape = patch.shape[-3:]
                 sem = F.interpolate(out.semantic_prob, size=target_shape, mode="trilinear", align_corners=False)
                 app = F.interpolate(out.appearance_prob, size=target_shape, mode="trilinear", align_corners=False)
                 sem_sum[(slice(None), slice(None), *slicer[1:])] += sem
                 app_sum[(slice(None), slice(None), *slicer[1:])] += app
+                if out.layer_ensemble is not None:
+                    for name, key in (
+                        ("text_last_layer", "last_layer_prob"),
+                        ("text_layer_mean", "layer_mean_prob"),
+                        ("text_base_fusion", "p_base"),
+                        ("text_candidate_enhanced", "p_final"),
+                    ):
+                        if key == "last_layer_prob":
+                            prob = 0.5 * (out.layer_ensemble["semantic_p_last"] + out.layer_ensemble["appearance_p_last"])
+                        elif key == "layer_mean_prob":
+                            prob = 0.5 * (out.layer_ensemble["semantic_p_mean"] + out.layer_ensemble["appearance_p_mean"])
+                        else:
+                            prob = out.layer_ensemble[key]
+                        prob = F.interpolate(prob, size=target_shape, mode="trilinear", align_corners=False)
+                        if name not in text_layer_sums:
+                            text_layer_sums[name] = torch.zeros_like(sem_sum)
+                        text_layer_sums[name][(slice(None), slice(None), *slicer[1:])] += prob
+                    candidate = F.interpolate(out.layer_ensemble["candidate_score"], size=target_shape, mode="trilinear", align_corners=False)
+                    text_candidate_sum[(slice(None), slice(None), *slicer[1:])] += candidate
                 count[(slice(None), slice(None), *slicer[1:])] += 1
                 visual = self.model.geometry_visual_proj(out.features.encoder_stages[self.model.geometry_feature_idx])
                 visual = F.interpolate(visual, size=target_shape, mode="trilinear", align_corners=False)
@@ -138,6 +168,14 @@ class DHGAEvaluator:
             app_prob = app_sum / count.clamp_min(1)
             visual_feature = visual_sum / count.clamp_min(1)
             router = self.model.router(sem_prob, app_prob, visual_context=visual_feature.mean(dim=1, keepdim=True))
+            text_probs = {name: value / count.clamp_min(1) for name, value in text_layer_sums.items()}
+            if text_probs:
+                final_text_prob = text_probs["text_candidate_enhanced"]
+                base_text_prob = text_probs["text_base_fusion"]
+                router.fused_prob = base_text_prob
+            else:
+                final_text_prob = None
+                base_text_prob = None
             sem_mask = sem_prob >= self.config.pred_threshold
             app_mask = app_prob >= self.config.pred_threshold
             sem_only = sem_mask & ~app_mask
@@ -163,6 +201,13 @@ class DHGAEvaluator:
                 "geometry_gate_disagreement_mean": float((router.w_geo * router.disagreement).sum().cpu() / router.disagreement.sum().clamp_min(1e-6).cpu()),
                 "geometry_gate_high_disagreement_mean": _masked_tensor_mean(router.w_geo, disagreement_region),
             }
+            if text_probs:
+                candidate_prob = text_candidate_sum / count.clamp_min(1)
+                self.last_case_diagnostics.update({
+                    "text_layer_candidate_ratio": float((candidate_prob > 0).float().mean().cpu()),
+                    "text_layer_base_pred_volume": float((base_text_prob >= self.config.pred_threshold).float().mean().cpu()),
+                    "text_layer_enhanced_pred_volume": float((final_text_prob >= self.config.pred_threshold).float().mean().cpu()),
+                })
             geometry_stats = {}
             if self.config.dhga_geometry_enabled:
                 geometry = self.model.run_geometry(data_t,sem_prob,app_prob,router, self.model.text_embeddings, spacing, visual_feature=visual_feature,visual_feature_is_projected=True,)
@@ -189,7 +234,7 @@ class DHGAEvaluator:
                 geometry_stats = summarize_geometry_tensors(geometry["dense_displacement_mm"], effective_gate, router.fused_prob, final, self.config.pred_threshold)
             else:
                 geometry = None
-                final=router.fused_prob
+                final = final_text_prob if final_text_prob is not None else router.fused_prob
         final = final[(slice(None), slice(None), *slicer_revert_padding[1:])].cpu().numpy()[0]
         fused_crop = router.fused_prob[(slice(None), slice(None), *slicer_revert_padding[1:])].cpu().numpy()[0]
         sem_crop = sem_prob[(slice(None), slice(None), *slicer_revert_padding[1:])].cpu().numpy()[0]
@@ -202,6 +247,12 @@ class DHGAEvaluator:
         fused_reverted = self.insert_crop_into_image(fused_reverted, fused_crop, bbox)
         sem_reverted = self.insert_crop_into_image(sem_reverted, sem_crop, bbox)
         app_reverted = self.insert_crop_into_image(app_reverted, app_crop, bbox)
+        self.last_text_layer_preds = {}
+        for name, prob in text_probs.items():
+            crop = prob[(slice(None), slice(None), *slicer_revert_padding[1:])].cpu().numpy()[0]
+            restored = np.zeros((crop.shape[0], *orig_shape), dtype=np.float32)
+            restored = self.insert_crop_into_image(restored, crop, bbox)
+            self.last_text_layer_preds[name] = restored[0] >= self.config.pred_threshold
         self.last_raw_disagreement = np.abs(sem_reverted[0].astype(np.float32) - app_reverted[0].astype(np.float32))
         self.last_fused_pred = fused_reverted[0] >= self.config.pred_threshold
         self.last_semantic_pred = sem_reverted[0] >= self.config.pred_threshold

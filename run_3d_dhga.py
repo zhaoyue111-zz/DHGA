@@ -6,7 +6,7 @@ from pathlib import Path
 import sys
 import torch
 
-from dhga.config import DHGAConfig, parse_int_list
+from dhga.config import DHGAConfig, parse_float_list, parse_int_list
 from dhga.trainer import DHGAStageTrainer, run_synthetic_smoke
 from dhga.evaluation import DHGAEvaluator
 from voxtell_sfda.adapter import load_prompts
@@ -58,6 +58,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tensorboard_enabled", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--tensorboard_log_interval", type=int, default=1)
     parser.add_argument("--tensorboard_image_interval", type=int, default=50)
+    parser.add_argument("--dhga_stage_b_method", choices=("legacy", "text_layer_ensemble"), default="legacy")
     parser.add_argument("--dhga_stage_b_anchor_candidate_patches", type=int, default=24)
     parser.add_argument("--dhga_stage_b_include_background_patch", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--dhga_validation_interval_epochs", type=int, default=2)
@@ -84,6 +85,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dhga_weak_strong_weight", type=float, default=0.5)
     parser.add_argument("--dhga_router_target_weight", type=float, default=0.5)
     parser.add_argument("--dhga_router_normalization", choices=("case_rank", "none"), default="case_rank")
+    parser.add_argument("--dhga_text_layer_weights", nargs="*", default=[])
+    parser.add_argument("--dhga_text_layer_temperature", type=float, default=0.1)
+    parser.add_argument("--dhga_text_layer_foreground_support_threshold", type=float, default=0.5)
+    parser.add_argument("--dhga_text_layer_candidate_max_ratio", type=float, default=0.1)
+    parser.add_argument("--dhga_text_layer_candidate_alpha", type=float, default=0.5)
+    parser.add_argument("--dhga_text_layer_stability_threshold", type=float, default=0.08)
+    parser.add_argument("--dhga_text_layer_reliable_fg_threshold", type=float, default=0.8)
+    parser.add_argument("--dhga_text_layer_reliable_bg_threshold", type=float, default=0.2)
+    parser.add_argument("--dhga_text_layer_candidate_weight", type=float, default=0.1)
     parser.add_argument("--dhga_geometry_enabled", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--dhga_search_radius_mm", type=float, default=6.0)
     parser.add_argument("--dhga_surface_tolerance_mm", type=float, default=1.0)
@@ -128,6 +138,8 @@ def config_from_args(args: argparse.Namespace) -> DHGAConfig:
             value = getattr(args, key)
             if key == "dhga_appearance_feature_layers":
                 value = parse_int_list(value, values.get(key, [-1, -2, -3]))
+            elif key == "dhga_text_layer_weights":
+                value = parse_float_list(value, values.get(key, []))
             elif key == "dhga_corruption_modes":
                 value = list(value)
             elif key == "prompt_templates":
@@ -157,6 +169,7 @@ def config_from_args(args: argparse.Namespace) -> DHGAConfig:
         tensorboard_enabled=args.tensorboard_enabled,
         tensorboard_log_interval=args.tensorboard_log_interval,
         tensorboard_image_interval=args.tensorboard_image_interval,
+        dhga_stage_b_method=args.dhga_stage_b_method,
         dhga_stage_b_anchor_candidate_patches=args.dhga_stage_b_anchor_candidate_patches,
         dhga_stage_b_include_background_patch=args.dhga_stage_b_include_background_patch,
         dhga_validation_interval_epochs=args.dhga_validation_interval_epochs,
@@ -180,6 +193,15 @@ def config_from_args(args: argparse.Namespace) -> DHGAConfig:
         dhga_weak_strong_weight=args.dhga_weak_strong_weight,
         dhga_router_target_weight=args.dhga_router_target_weight,
         dhga_router_normalization=args.dhga_router_normalization,
+        dhga_text_layer_weights=parse_float_list(args.dhga_text_layer_weights, []),
+        dhga_text_layer_temperature=args.dhga_text_layer_temperature,
+        dhga_text_layer_foreground_support_threshold=args.dhga_text_layer_foreground_support_threshold,
+        dhga_text_layer_candidate_max_ratio=args.dhga_text_layer_candidate_max_ratio,
+        dhga_text_layer_candidate_alpha=args.dhga_text_layer_candidate_alpha,
+        dhga_text_layer_stability_threshold=args.dhga_text_layer_stability_threshold,
+        dhga_text_layer_reliable_fg_threshold=args.dhga_text_layer_reliable_fg_threshold,
+        dhga_text_layer_reliable_bg_threshold=args.dhga_text_layer_reliable_bg_threshold,
+        dhga_text_layer_candidate_weight=args.dhga_text_layer_candidate_weight,
         dhga_geometry_enabled=args.dhga_geometry_enabled,
         dhga_search_radius_mm=args.dhga_search_radius_mm,
         dhga_surface_tolerance_mm=args.dhga_surface_tolerance_mm,
