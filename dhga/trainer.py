@@ -758,10 +758,16 @@ class DHGAStageTrainer:
         return loss, metrics
 
     def _stage_b_text_layer_ensemble(self, patch: Tensor, spacing: tuple[float, float, float]) -> tuple[Tensor, dict[str, float]]:
+        weak, strong, _ = weak_strong_intensity_views(patch)
         before_encoder_calls = int(getattr(self.model, "encoder_calls", 0))
-        out = self.model.forward_text_layer_ensemble(patch, spacing) if hasattr(self.model, "forward_text_layer_ensemble") else self.model(patch, spacing, run_geometry=False)
-        loss, metrics = text_layer_training_loss(out, self.config)
+        with torch.autocast(self.device.type, enabled=False):
+            teacher_out = self._teacher_forward(weak.float(), spacing, run_geometry=False)
+        out = self.model.forward_text_layer_ensemble(strong, spacing, run_geometry=False) if hasattr(self.model, "forward_text_layer_ensemble") else self.model(strong, spacing, run_geometry=False)
+        if teacher_out.layer_ensemble is None:
+            raise RuntimeError("text_layer_ensemble Stage B requires teacher layer_ensemble outputs")
+        loss, metrics = text_layer_training_loss(out, self.config, teacher_out.layer_ensemble)
         ens = out.layer_ensemble or {}
+        teacher_ens = teacher_out.layer_ensemble or {}
         sem_layers = ens.get("semantic_layer_probs")
         app_layers = ens.get("appearance_layer_probs")
         if isinstance(sem_layers, Tensor):
@@ -779,8 +785,16 @@ class DHGAStageTrainer:
             value = ens.get(key)
             if isinstance(value, Tensor):
                 metrics[f"dhga_text_layer_{key}_pred_volume"] = float((value >= self.config.pred_threshold).float().mean().detach().cpu())
+        for key in ("reliable_fg", "reliable_bg", "candidate_fg", "p_final"):
+            value = teacher_ens.get(key)
+            if isinstance(value, Tensor):
+                if key == "p_final":
+                    metrics["dhga_text_layer_teacher_target_volume"] = float((value >= self.config.pred_threshold).float().mean().detach().cpu())
+                else:
+                    metrics[f"dhga_text_layer_teacher_{key}_ratio"] = float((value > 0.5).float().mean().detach().cpu())
         metrics["dhga_text_layer_base_to_enhanced_abs_delta"] = float((ens["p_final"] - ens["p_base"]).abs().mean().detach().cpu()) if "p_final" in ens and "p_base" in ens else 0.0
         metrics["dhga_text_layer_encoder_calls_per_forward"] = float(int(getattr(self.model, "encoder_calls", 0)) - before_encoder_calls)
+        metrics["dhga_text_layer_teacher_student_forwards"] = 2.0
         metrics["dhga_text_layer_method_enabled"] = 1.0
         metrics["dhga_text_layer_legacy_anchor_loss_active"] = 0.0
         metrics["dhga_text_layer_legacy_router_loss_active"] = 0.0
@@ -897,6 +911,8 @@ class DHGAStageTrainer:
             spacing,
             initial_sdf=corrupted_sdf,
             visual_feature=student_out.features.encoder_stages[self.model.geometry_feature_idx],
+            candidate_score=student_out.layer_ensemble.get("candidate_score").detach() if student_out.layer_ensemble else None,
+            candidate_fg=student_out.layer_ensemble.get("candidate_fg").detach() if student_out.layer_ensemble else None,
         )
         sampled_target, valid_target = sample_along_normals(
             recovery_target,

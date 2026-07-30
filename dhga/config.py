@@ -56,7 +56,8 @@ class DHGAConfig:
     dhga_text_layer_temperature: float = 0.1
     dhga_text_layer_foreground_support_threshold: float = 0.5
     dhga_text_layer_candidate_max_ratio: float = 0.1
-    dhga_text_layer_candidate_alpha: float = 0.5
+    dhga_text_layer_candidate_alpha: float = 0.2
+    dhga_text_layer_disagreement_threshold: float = 0.05
     dhga_text_layer_stability_threshold: float = 0.08
     dhga_text_layer_reliable_fg_threshold: float = 0.8
     dhga_text_layer_reliable_bg_threshold: float = 0.2
@@ -133,6 +134,7 @@ class DHGAConfig:
             "dhga_text_layer_foreground_support_threshold",
             "dhga_text_layer_candidate_max_ratio",
             "dhga_text_layer_candidate_alpha",
+            "dhga_text_layer_disagreement_threshold",
             "dhga_text_layer_stability_threshold",
             "dhga_text_layer_reliable_fg_threshold",
             "dhga_text_layer_reliable_bg_threshold",

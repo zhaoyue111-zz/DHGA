@@ -17,6 +17,17 @@ ARCHITECTURE_KEYS = {
     "dhga_semantic_adapter_target",
     "dhga_appearance_feature_layers",
     "dhga_appearance_hidden_ratio",
+    "dhga_stage_b_method",
+    "dhga_text_layer_weights",
+    "dhga_text_layer_temperature",
+    "dhga_text_layer_foreground_support_threshold",
+    "dhga_text_layer_candidate_max_ratio",
+    "dhga_text_layer_candidate_alpha",
+    "dhga_text_layer_disagreement_threshold",
+    "dhga_text_layer_stability_threshold",
+    "dhga_text_layer_reliable_fg_threshold",
+    "dhga_text_layer_reliable_bg_threshold",
+    "dhga_text_layer_candidate_weight",
     "dhga_geometry_feature_layer",
     "dhga_geometry_feature_channels",
     "dhga_geometry_max_displacement_mm",
@@ -89,7 +100,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dhga_text_layer_temperature", type=float, default=0.1)
     parser.add_argument("--dhga_text_layer_foreground_support_threshold", type=float, default=0.5)
     parser.add_argument("--dhga_text_layer_candidate_max_ratio", type=float, default=0.1)
-    parser.add_argument("--dhga_text_layer_candidate_alpha", type=float, default=0.5)
+    parser.add_argument("--dhga_text_layer_candidate_alpha", type=float, default=0.2)
+    parser.add_argument("--dhga_text_layer_disagreement_threshold", type=float, default=0.05)
     parser.add_argument("--dhga_text_layer_stability_threshold", type=float, default=0.08)
     parser.add_argument("--dhga_text_layer_reliable_fg_threshold", type=float, default=0.8)
     parser.add_argument("--dhga_text_layer_reliable_bg_threshold", type=float, default=0.2)
@@ -198,6 +210,7 @@ def config_from_args(args: argparse.Namespace) -> DHGAConfig:
         dhga_text_layer_foreground_support_threshold=args.dhga_text_layer_foreground_support_threshold,
         dhga_text_layer_candidate_max_ratio=args.dhga_text_layer_candidate_max_ratio,
         dhga_text_layer_candidate_alpha=args.dhga_text_layer_candidate_alpha,
+        dhga_text_layer_disagreement_threshold=args.dhga_text_layer_disagreement_threshold,
         dhga_text_layer_stability_threshold=args.dhga_text_layer_stability_threshold,
         dhga_text_layer_reliable_fg_threshold=args.dhga_text_layer_reliable_fg_threshold,
         dhga_text_layer_reliable_bg_threshold=args.dhga_text_layer_reliable_bg_threshold,

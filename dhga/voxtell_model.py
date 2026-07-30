@@ -24,7 +24,7 @@ from dhga.geometry import (
 )
 from dhga.routing import DisagreementRouter, RouterOutput
 from dhga.shared_voxtell import SharedVoxTellFeatures, freeze_module, trainable_parameter_summary
-from dhga.text_layer_ensemble import fuse_text_layer_ensemble, summarize_layer_probs
+from dhga.text_layer_ensemble import fuse_text_layer_ensemble, highest_resolution_layer_index, order_layers_high_to_low, summarize_layer_probs
 from voxtell_sfda.adapter import build_prompt_variants, load_prompts, prepare_voxtell_import
 from voxtell_sfda.lora import inject_lora_into_voxtell_decoder, mark_only_lora_trainable
 
@@ -188,8 +188,8 @@ class DHGAVoxTellModel(nn.Module):
             self.appearance_expert.train(old_training)
 
     def forward(self, image: Tensor, spacing: tuple[float, float, float] = (1.0, 1.0, 1.0), run_geometry: bool = True) -> DHGAForwardOutput:
-        if self.config.dhga_stage_b_method == "text_layer_ensemble" and self.config.dhga_stage == "B":
-            return self.forward_text_layer_ensemble(image, spacing)
+        if self.config.dhga_stage_b_method == "text_layer_ensemble":
+            return self.forward_text_layer_ensemble(image, spacing, run_geometry=run_geometry)
         features = self.encode_once(image, spacing)
         if not self.config.dhga_enabled:
             return self.baseline_forward_from_features(features)
@@ -230,20 +230,52 @@ class DHGAVoxTellModel(nn.Module):
             features=features,
         )
 
-    def forward_text_layer_ensemble(self, image: Tensor, spacing: tuple[float, float, float] = (1.0, 1.0, 1.0)) -> DHGAForwardOutput:
+    @contextmanager
+    def decoder_deep_supervision_enabled(self):
+        decoder = getattr(self.network, "decoder", None)
+        old_decoder = getattr(decoder, "deep_supervision", None)
+        old_network = getattr(self.network, "deep_supervision", None)
+        if old_decoder is not None:
+            decoder.deep_supervision = True
+        if old_network is not None:
+            self.network.deep_supervision = True
+        try:
+            yield
+        finally:
+            if old_decoder is not None:
+                decoder.deep_supervision = old_decoder
+            if old_network is not None:
+                self.network.deep_supervision = old_network
+
+    def forward_text_layer_ensemble(
+        self,
+        image: Tensor,
+        spacing: tuple[float, float, float] = (1.0, 1.0, 1.0),
+        run_geometry: bool = True,
+    ) -> DHGAForwardOutput:
         features = self.encode_once(image, spacing)
-        semantic_logits, projected_prompt, semantic_layers = self.decode_from_features(
-            features.encoder_stages,
-            features.selected_feature,
-            return_all_layers=True,
-        )
-        with self.lora_disabled():
-            app_features = self.appearance_expert.adapt_features(features, self.config.dhga_appearance_feature_dropout)
-            appearance_logits, _projected_unused, appearance_layers = self.decode_from_features(
-                app_features.encoder_stages,
-                app_features.selected_feature,
+        with self.decoder_deep_supervision_enabled():
+            semantic_logits, projected_prompt, semantic_layers = self.decode_from_features(
+                features.encoder_stages,
+                features.selected_feature,
                 return_all_layers=True,
             )
+            with self.lora_disabled():
+                app_features = self.appearance_expert.adapt_features(features, self.config.dhga_appearance_feature_dropout)
+                appearance_logits, _projected_unused, appearance_layers = self.decode_from_features(
+                    app_features.encoder_stages,
+                    app_features.selected_feature,
+                    return_all_layers=True,
+                )
+        if len(semantic_layers) <= 1 or len(appearance_layers) <= 1:
+            raise RuntimeError(
+                "text_layer_ensemble requires multiple native VoxTell decoder outputs. "
+                "Check that decoder.deep_supervision is available and enabled for this path."
+            )
+        semantic_layers = order_layers_high_to_low(semantic_layers)
+        appearance_layers = order_layers_high_to_low(appearance_layers)
+        semantic_logits = semantic_layers[0]
+        appearance_logits = appearance_layers[0]
         semantic_prob = self._class_probs(semantic_logits)
         appearance_prob = self._class_probs(appearance_logits)
         target_shape = tuple(semantic_prob.shape[-3:])
@@ -273,6 +305,32 @@ class DHGAVoxTellModel(nn.Module):
             "appearance_p_last": appearance_summary["p_last"],
             "candidate_map_for_geometry": fused["candidate_score"].detach(),
         }
+        geometry = {}
+        final_prob = fused["p_final"]
+        if run_geometry and self.config.dhga_geometry_enabled:
+            visual_feature = features.encoder_stages[self.geometry_feature_idx]
+            geometry = self.run_geometry(
+                image,
+                semantic_summary["p_mean"],
+                appearance_summary["p_mean"],
+                router,
+                self.text_embeddings,
+                spacing,
+                visual_feature=visual_feature,
+                candidate_score=fused["candidate_score"].detach(),
+                candidate_fg=fused["candidate_fg"].detach(),
+            )
+            if "dense_displacement_mm" in geometry:
+                sdf = mask_to_sdf(router.fused_prob >= self.config.pred_threshold, spacing)
+                final_prob = finalize_probability(
+                    router.fused_prob,
+                    sdf,
+                    geometry["dense_displacement_mm"],
+                    router.w_geo,
+                    self.config,
+                    geometry.get("dense_valid_weight"),
+                    expert_disagreement=(semantic_summary["p_mean"] - appearance_summary["p_mean"]).abs().clamp(0, 1),
+                )
         return DHGAForwardOutput(
             semantic_logits=semantic_logits,
             appearance_logits=appearance_logits,
@@ -280,8 +338,8 @@ class DHGAVoxTellModel(nn.Module):
             appearance_prob=appearance_prob,
             anchor_prob=semantic_prob.detach(),
             router=router,
-            geometry={},
-            final_prob=fused["p_final"],
+            geometry=geometry,
+            final_prob=final_prob,
             features=features,
             layer_ensemble=layer_ensemble,
         )
@@ -362,10 +420,15 @@ class DHGAVoxTellModel(nn.Module):
                 scale_outs = run_decoder(*skips, *prompt_embeds)
             outs.append(scale_outs)
         outs = [torch.cat(scale_outs, dim=1) for scale_outs in zip(*outs)]
+        if return_all_layers:
+            hi_idx = highest_resolution_layer_index(outs)
+            outs = order_layers_high_to_low(outs)
+        else:
+            hi_idx = len(outs) - 1
         prompt = projected_prompt.permute(1, 0, 2)
         if return_all_layers:
-            return outs[-1], prompt, outs
-        return outs[-1], prompt
+            return outs[0], prompt, outs
+        return outs[hi_idx], prompt
 
     def run_geometry(
         self,
@@ -381,15 +444,22 @@ class DHGAVoxTellModel(nn.Module):
         boundary_points: Tensor | None = None,
         boundary_normals: Tensor | None = None,
         valid_boundary_points: Tensor | None = None,
+        candidate_score: Tensor | None = None,
+        candidate_fg: Tensor | None = None,
     ) -> dict[str, Tensor]:
         sdf = initial_sdf if initial_sdf is not None else mask_to_sdf(router.fused_prob >= self.config.pred_threshold, spacing)
+        sampling_weight = router.geometry_disagreement_weight
+        if candidate_score is not None:
+            if candidate_score.shape[-3:] != sampling_weight.shape[-3:]:
+                candidate_score = F.interpolate(candidate_score.float(), size=sampling_weight.shape[-3:], mode="trilinear", align_corners=False)
+            sampling_weight = torch.maximum(sampling_weight, candidate_score.to(device=sampling_weight.device, dtype=sampling_weight.dtype).clamp(0, 1))
         if boundary_points is None or boundary_normals is None or valid_boundary_points is None:
             points, normals, valid_points = extract_boundary_points(
                 sdf,
                 self.config.dhga_surface_tolerance_mm,
                 self.config.dhga_max_boundary_points,
                 spacing,
-                sampling_weight=router.geometry_disagreement_weight,
+                sampling_weight=sampling_weight,
             )
         else:
             points, normals, valid_points = boundary_points, boundary_normals, valid_boundary_points
@@ -451,6 +521,9 @@ class DHGAVoxTellModel(nn.Module):
             "dense_valid_weight": dense_weight,
             "effective_gate": effective_gate,
             "expert_disagreement": expert_disagreement,
+            "candidate_score": candidate_score.detach() if candidate_score is not None else torch.zeros_like(router.fused_prob),
+            "candidate_fg": candidate_fg.detach() if candidate_fg is not None else torch.zeros_like(router.fused_prob),
+            "geometry_sampling_weight": sampling_weight.detach(),
             "displacement_entropy": pred["entropy"],
         }
 

@@ -62,6 +62,7 @@ class FakeVoxTellTransformerDecoder(torch.nn.Module):
 class FakeVoxTellNativeDecoder(torch.nn.Module):
     def __init__(self) -> None:
         super().__init__()
+        self.deep_supervision = False
         self.low = torch.nn.Conv3d(8, 1, 1)
         self.high = torch.nn.Conv3d(4, 1, 1)
 
@@ -69,7 +70,8 @@ class FakeVoxTellNativeDecoder(torch.nn.Module):
         prompt = prompt_embeds[-1].mean(dim=(1, 2)).view(skips[-1].shape[0], 1, 1, 1, 1)
         low = self.low(skips[-1]) + prompt
         high = self.high(skips[0]) + torch.nn.functional.interpolate(low, size=skips[0].shape[-3:], mode="trilinear", align_corners=False)
-        return [low, high]
+        outputs = [high, low]
+        return outputs if self.deep_supervision else outputs[:1]
 
 
 class FakeVoxTellNetwork(torch.nn.Module):
@@ -874,6 +876,16 @@ class DHGAStaticTests(unittest.TestCase):
         self.assertEqual(tuple(summary["layer_probs"].shape), (2, 1, 1, 4, 6, 8))
         self.assertEqual(tuple(summary["p_mean"].shape), (1, 1, 4, 6, 8))
 
+    def test_local_voxtell_decoder_contract_is_highest_resolution_first(self):
+        voxtell_path = Path("/data/zy/VoxTell_from_disk/voxtell/model/voxtell_model.py")
+        if not voxtell_path.exists():
+            self.skipTest("local VoxTell source is not available")
+        source = voxtell_path.read_text()
+        self.assertIn("seg_outputs = seg_outputs[::-1]", source)
+        self.assertIn("return seg_outputs[:1]", source)
+        self.assertIn("returns predictions at all scales", source)
+        self.assertIn("from highest to lowest resolution", source)
+
     def test_text_layer_candidate_rules_and_bounded_enhancement(self):
         config = DHGAConfig(
             dhga_stage_b_method="text_layer_ensemble",
@@ -926,9 +938,12 @@ class DHGAStaticTests(unittest.TestCase):
         model = make_fake_text_layer_model()
         image = torch.randn(1, 1, 8, 8, 8)
         features = model.encode_once(image, (1.0, 1.0, 1.0))
-        final, _prompt, layers = model.decode_from_features(features.encoder_stages, features.selected_feature, return_all_layers=True)
+        with model.decoder_deep_supervision_enabled():
+            final, _prompt, layers = model.decode_from_features(features.encoder_stages, features.selected_feature, return_all_layers=True)
         self.assertEqual(len(layers), 2)
-        self.assertEqual(tuple(final.shape[-3:]), tuple(layers[-1].shape[-3:]))
+        self.assertEqual(tuple(final.shape[-3:]), (8, 8, 8))
+        self.assertEqual(tuple(layers[0].shape[-3:]), (8, 8, 8))
+        self.assertEqual(tuple(layers[1].shape[-3:]), (4, 4, 4))
         self.assertFalse(hasattr(model, "appearance_seg_head"))
 
     def test_text_layer_forward_uses_one_encoder_call_and_no_random_head(self):
@@ -938,7 +953,17 @@ class DHGAStaticTests(unittest.TestCase):
         self.assertEqual(model.encoder_calls, 1)
         self.assertIsNotNone(out.layer_ensemble)
         self.assertEqual(tuple(out.final_prob.shape[-3:]), (8, 8, 8))
+        self.assertEqual(tuple(out.layer_ensemble["semantic_layer_probs"].shape), (2, 1, 1, 8, 8, 8))
+        self.assertGreater(float(out.layer_ensemble["semantic_u_layer"].abs().mean()), 0.0)
         self.assertFalse(hasattr(model, "appearance_seg_head"))
+
+    def test_legacy_decode_keeps_single_native_output(self):
+        model = make_fake_text_layer_model(DHGAConfig(dhga_stage="B", dhga_stage_b_method="legacy", dhga_geometry_enabled=False, dhga_appearance_feature_layers=[0, 1]))
+        image = torch.randn(1, 1, 8, 8, 8)
+        features = model.encode_once(image, (1.0, 1.0, 1.0))
+        final, _prompt = model.decode_from_features(features.encoder_stages, features.selected_feature)
+        self.assertEqual(tuple(final.shape[-3:]), (8, 8, 8))
+        self.assertFalse(model.network.decoder.deep_supervision)
 
     def test_text_layer_stage_b_gradients_and_frozen_router_geometry(self):
         config = DHGAConfig(
@@ -955,6 +980,8 @@ class DHGAStaticTests(unittest.TestCase):
         trainer = DHGAStageTrainer.__new__(DHGAStageTrainer)
         trainer.config = config
         trainer.device = torch.device("cpu")
+        trainer.teacher = None
+        trainer.global_step = 0
         trainer.model = make_fake_text_layer_model(config)
         trainer._set_stage_trainability()
         trainer._validate_stage_trainability()
@@ -966,7 +993,48 @@ class DHGAStaticTests(unittest.TestCase):
         self.assertGreater(grad_metrics["dhga_grad_appearance_expert_nonzero_tensors"], 0.0)
         self.assertEqual(grad_metrics["dhga_grad_router_trainable_tensors"], 0.0)
         self.assertEqual(grad_metrics["dhga_grad_geometry_trainable_tensors"], 0.0)
-        self.assertEqual(metrics["dhga_text_layer_encoder_calls_per_forward"], 1.0)
+        self.assertEqual(metrics["dhga_text_layer_encoder_calls_per_forward"], 2.0)
+        self.assertEqual(metrics["dhga_text_layer_teacher_student_forwards"], 2.0)
+        self.assertIn("dhga_text_layer_teacher_candidate_fg_ratio", metrics)
+
+    def test_text_layer_teacher_targets_drive_student_loss(self):
+        config = DHGAConfig(dhga_stage_b_method="text_layer_ensemble")
+        student_p = torch.full((1, 1, 1, 1, 2), 0.5, requires_grad=True)
+        teacher_target = torch.tensor([[[[[1.0, 0.0]]]]])
+        student = SimpleNamespace(layer_ensemble={
+            "semantic_p_mean": student_p,
+            "appearance_p_mean": student_p,
+            "p_final": student_p,
+        })
+        teacher = {
+            "reliable_fg": torch.tensor([[[[[1.0, 0.0]]]]]),
+            "reliable_bg": torch.tensor([[[[[0.0, 1.0]]]]]),
+            "candidate_fg": torch.zeros(1, 1, 1, 1, 2),
+            "ignored": torch.zeros(1, 1, 1, 1, 2),
+            "p_final": teacher_target,
+        }
+        loss, _ = text_layer_training_loss(student, config, teacher)
+        loss.backward()
+        self.assertTrue(torch.isfinite(loss))
+        self.assertIsNotNone(student_p.grad)
+
+    def test_geometry_consumes_text_layer_candidate_and_final_probability(self):
+        config = DHGAConfig(
+            dhga_stage="C",
+            dhga_stage_b_method="text_layer_ensemble",
+            dhga_geometry_enabled=True,
+            dhga_appearance_feature_layers=[0, 1],
+            dhga_max_boundary_points=16,
+            dhga_boundary_chunk_size=8,
+        )
+        model = make_fake_text_layer_model(config)
+        image = torch.randn(1, 1, 8, 8, 8)
+        out = model.forward_text_layer_ensemble(image, run_geometry=True)
+        self.assertIn("candidate_score", out.geometry)
+        self.assertIn("geometry_sampling_weight", out.geometry)
+        self.assertTrue(torch.allclose(out.geometry["candidate_score"], out.layer_ensemble["candidate_score"].detach()))
+        self.assertTrue(torch.all(out.geometry["geometry_sampling_weight"] >= out.layer_ensemble["candidate_score"].detach()))
+        self.assertTrue(torch.allclose(out.router.fused_prob, out.layer_ensemble["p_final"]))
 
     def test_legacy_stage_b_trainability_remains_router_enabled(self):
         class FakeLoRA(torch.nn.Module):

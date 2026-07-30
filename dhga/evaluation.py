@@ -172,10 +172,13 @@ class DHGAEvaluator:
             if text_probs:
                 final_text_prob = text_probs["text_candidate_enhanced"]
                 base_text_prob = text_probs["text_base_fusion"]
-                router.fused_prob = base_text_prob
+                candidate_prob = text_candidate_sum / count.clamp_min(1)
+                router.fused_prob = final_text_prob
+                router.geometry_disagreement_weight = torch.maximum(router.geometry_disagreement_weight, candidate_prob.clamp(0, 1))
             else:
                 final_text_prob = None
                 base_text_prob = None
+                candidate_prob = None
             sem_mask = sem_prob >= self.config.pred_threshold
             app_mask = app_prob >= self.config.pred_threshold
             sem_only = sem_mask & ~app_mask
@@ -202,7 +205,6 @@ class DHGAEvaluator:
                 "geometry_gate_high_disagreement_mean": _masked_tensor_mean(router.w_geo, disagreement_region),
             }
             if text_probs:
-                candidate_prob = text_candidate_sum / count.clamp_min(1)
                 self.last_case_diagnostics.update({
                     "text_layer_candidate_ratio": float((candidate_prob > 0).float().mean().cpu()),
                     "text_layer_base_pred_volume": float((base_text_prob >= self.config.pred_threshold).float().mean().cpu()),
@@ -210,7 +212,18 @@ class DHGAEvaluator:
                 })
             geometry_stats = {}
             if self.config.dhga_geometry_enabled:
-                geometry = self.model.run_geometry(data_t,sem_prob,app_prob,router, self.model.text_embeddings, spacing, visual_feature=visual_feature,visual_feature_is_projected=True,)
+                geometry = self.model.run_geometry(
+                    data_t,
+                    sem_prob,
+                    app_prob,
+                    router,
+                    self.model.text_embeddings,
+                    spacing,
+                    visual_feature=visual_feature,
+                    visual_feature_is_projected=True,
+                    candidate_score=candidate_prob,
+                    candidate_fg=(candidate_prob > 0).float() if candidate_prob is not None else None,
+                )
                 phi = mask_to_sdf(router.fused_prob >= self.config.pred_threshold, spacing)
                 effective_gate = geometry.get("effective_gate")
                 if effective_gate is None:

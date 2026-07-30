@@ -20,6 +20,19 @@ def align_layer_logits(layer_logits: list[Tensor], target_shape: tuple[int, int,
     return aligned
 
 
+def highest_resolution_layer_index(layer_logits: list[Tensor]) -> int:
+    if not layer_logits:
+        raise ValueError("layer_logits must contain at least one tensor")
+    volumes = [int(logits.shape[-3]) * int(logits.shape[-2]) * int(logits.shape[-1]) for logits in layer_logits]
+    return max(range(len(volumes)), key=lambda idx: volumes[idx])
+
+
+def order_layers_high_to_low(layer_logits: list[Tensor]) -> list[Tensor]:
+    indexed = list(enumerate(layer_logits))
+    indexed.sort(key=lambda item: int(item[1].shape[-3]) * int(item[1].shape[-2]) * int(item[1].shape[-1]), reverse=True)
+    return [logits for _, logits in indexed]
+
+
 def layer_weights_for_count(config: DHGAConfig, count: int, device: torch.device, dtype: torch.dtype) -> Tensor:
     if count <= 0:
         raise ValueError("count must be positive")
@@ -34,7 +47,8 @@ def layer_weights_for_count(config: DHGAConfig, count: int, device: torch.device
 
 
 def summarize_layer_probs(layer_probs: list[Tensor], config: DHGAConfig, target_shape: tuple[int, int, int] | None = None) -> dict[str, Tensor]:
-    target = target_shape or tuple(layer_probs[-1].shape[-3:])
+    layer_probs = order_layers_high_to_low(layer_probs)
+    target = target_shape or tuple(layer_probs[0].shape[-3:])
     aligned = []
     for prob in layer_probs:
         if tuple(prob.shape[-3:]) == tuple(target):
@@ -47,7 +61,7 @@ def summarize_layer_probs(layer_probs: list[Tensor], config: DHGAConfig, target_
     return {
         "layer_probs": probs,
         "p_mean": p_mean,
-        "p_last": probs[-1],
+        "p_last": probs[0],
         "p_max": probs.max(dim=0).values,
         "u_layer": (probs - p_mean.unsqueeze(0)).abs().mean(dim=0),
         "layer_weights": weights.flatten(),
@@ -55,7 +69,8 @@ def summarize_layer_probs(layer_probs: list[Tensor], config: DHGAConfig, target_
 
 
 def summarize_layers(layer_logits: list[Tensor], config: DHGAConfig, target_shape: tuple[int, int, int] | None = None) -> dict[str, Tensor]:
-    target = target_shape or tuple(layer_logits[-1].shape[-3:])
+    layer_logits = order_layers_high_to_low(layer_logits)
+    target = target_shape or tuple(layer_logits[0].shape[-3:])
     aligned = align_layer_logits(layer_logits, target)
     return summarize_layer_probs([logits.float().sigmoid() for logits in aligned], config, target)
 
@@ -99,7 +114,11 @@ def fuse_text_layer_ensemble(
     disagreement = torch.maximum(u_sem, u_app)
     normalized_disagreement = _minmax_normalize_per_case(disagreement)
     foreground_support = (p_max_all >= float(config.dhga_text_layer_foreground_support_threshold)).float()
-    candidate_score = _cap_candidate_ratio(normalized_disagreement * foreground_support, config.dhga_text_layer_candidate_max_ratio)
+    enough_disagreement = (disagreement >= float(config.dhga_text_layer_disagreement_threshold)).float()
+    candidate_score = _cap_candidate_ratio(
+        normalized_disagreement * foreground_support * enough_disagreement,
+        config.dhga_text_layer_candidate_max_ratio,
+    )
     candidate_fg = candidate_score > 0
 
     alpha = float(config.dhga_text_layer_candidate_alpha)
@@ -117,6 +136,7 @@ def fuse_text_layer_ensemble(
         "p_final": p_final,
         "p_max_all": p_max_all,
         "normalized_disagreement": normalized_disagreement,
+        "absolute_disagreement": disagreement,
         "candidate_score": candidate_score,
         "candidate_fg": candidate_fg.float(),
         "reliable_fg": reliable_fg.float(),
@@ -142,16 +162,17 @@ def balanced_masked_bce(prob: Tensor, fg_mask: Tensor, bg_mask: Tensor) -> Tenso
     return 0.5 * (losses[0] + losses[1])
 
 
-def text_layer_training_loss(out, config: DHGAConfig) -> tuple[Tensor, dict[str, float]]:
+def text_layer_training_loss(out, config: DHGAConfig, teacher_ensemble: dict[str, Tensor] | None = None) -> tuple[Tensor, dict[str, float]]:
     if out.layer_ensemble is None:
         raise ValueError("text_layer_training_loss requires DHGAForwardOutput.layer_ensemble")
     ens = out.layer_ensemble
-    fg = ens["reliable_fg"] > 0.5
-    bg = ens["reliable_bg"] > 0.5
-    candidate = ens["candidate_fg"] > 0.5
+    target_ens = teacher_ensemble or ens
+    fg = target_ens["reliable_fg"].detach() > 0.5
+    bg = target_ens["reliable_bg"].detach() > 0.5
+    candidate = target_ens["candidate_fg"].detach() > 0.5
     sem_loss = balanced_masked_bce(ens["semantic_p_mean"], fg, bg)
     app_loss = balanced_masked_bce(ens["appearance_p_mean"], fg, bg)
-    target = ens["p_final"].detach()
+    target = target_ens["p_final"].detach()
     if bool(candidate.any().detach().cpu()):
         candidate_loss = 0.5 * (
             F.mse_loss(ens["semantic_p_mean"][candidate], target[candidate])
@@ -167,7 +188,7 @@ def text_layer_training_loss(out, config: DHGAConfig) -> tuple[Tensor, dict[str,
         "dhga_text_layer_reliable_fg_ratio": _ratio(fg),
         "dhga_text_layer_reliable_bg_ratio": _ratio(bg),
         "dhga_text_layer_candidate_ratio": _ratio(candidate),
-        "dhga_text_layer_ignore_ratio": _ratio(ens["ignored"] > 0.5),
+        "dhga_text_layer_ignore_ratio": _ratio(target_ens["ignored"].detach() > 0.5) if "ignored" in target_ens else 0.0,
     }
     return loss, metrics
 
