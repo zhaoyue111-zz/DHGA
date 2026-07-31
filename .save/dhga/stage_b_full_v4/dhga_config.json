@@ -24,7 +24,7 @@
   "tensorboard_enabled": true,
   "tensorboard_log_interval": 1,
   "tensorboard_image_interval": 50,
-  "dhga_stage_b_method": "legacy",
+  "dhga_stage_b_method": "text_layer_ensemble",
   "dhga_stage_b_anchor_candidate_patches": 24,
   "dhga_stage_b_include_background_patch": true,
   "dhga_validation_interval_epochs": 1,
