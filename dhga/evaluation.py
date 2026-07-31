@@ -533,9 +533,10 @@ def gt_boundary_band(mask: np.ndarray, spacing: tuple[float, float, float], band
         return np.zeros_like(mask, dtype=bool)
     try:
         from scipy import ndimage
-        outside = ndimage.distance_transform_edt(~mask, sampling=spacing)
-        inside = ndimage.distance_transform_edt(mask, sampling=spacing)
-        return np.minimum(outside, inside) <= float(band_mm)
+        outside_distance = ndimage.distance_transform_edt(~mask, sampling=spacing)
+        inside_distance = ndimage.distance_transform_edt(mask, sampling=spacing)
+        signed_side_distance = np.where(mask, inside_distance, outside_distance)
+        return signed_side_distance <= float(band_mm)
     except Exception:
         min_spacing = max(float(min(spacing)), 1e-6)
         iterations = max(1, int(np.ceil(float(band_mm) / min_spacing)))

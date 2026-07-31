@@ -4,7 +4,7 @@ import numpy as np
 import torch
 
 from dhga.config import DHGAConfig
-from dhga.evaluation import compute_directional_candidate_metrics
+from dhga.evaluation import compute_directional_candidate_metrics, gt_boundary_band
 from dhga.text_layer_ensemble import build_directional_candidate_scores, fuse_text_layer_ensemble, text_layer_training_loss
 
 
@@ -80,3 +80,14 @@ def test_directional_candidate_metrics_reward_error_hits():
     assert metrics["directional_shrink_top05_hit_rate"] > 0
     assert metrics["directional_expand_top05_boundary_fn_coverage"] > 0
     assert metrics["directional_shrink_top05_boundary_fp_coverage"] > 0
+
+
+def test_boundary_band_is_local_not_whole_volume():
+    mask = np.zeros((15, 15, 15), dtype=bool)
+    mask[5:10, 5:10, 5:10] = True
+    band = gt_boundary_band(mask, (1.0, 1.0, 1.0), 1.0)
+    assert band.any()
+    assert not band.all()
+    assert not band[0, 0, 0]
+    assert band[5, 7, 7]
+    assert not band[7, 7, 7]
