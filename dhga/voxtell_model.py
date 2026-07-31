@@ -254,36 +254,113 @@ class DHGAVoxTellModel(nn.Module):
         run_geometry: bool = True,
     ) -> DHGAForwardOutput:
         features = self.encode_once(image, spacing)
+
+        # semantic 和 appearance 需要原生 decoder 的多层输出。
         with self.decoder_deep_supervision_enabled():
-            semantic_logits, projected_prompt, semantic_layers = self.decode_from_features(features.encoder_stages, features.selected_feature,return_all_layers=True,)
+            (
+                semantic_logits,
+                projected_prompt,
+                semantic_layers,
+            ) = self.decode_from_features(
+                features.encoder_stages,
+                features.selected_feature,
+                return_all_layers=True,
+            )
 
             with self.lora_disabled():
-                app_features = self.appearance_expert.adapt_features(features,self.config.dhga_appearance_feature_dropout,)
-                appearance_logits, _projected_unused,appearance_layers, = self.decode_from_features(app_features.encoder_stages,app_features.selected_feature,return_all_layers=True,)
+                app_features = self.appearance_expert.adapt_features(
+                    features,
+                    self.config.dhga_appearance_feature_dropout,
+                )
 
-            # 冻结的原始 VoxTell decoder 输出。
-            # 复用同一次 encoder，不增加 encoder forward。
-            with (torch.no_grad(),self.lora_disabled(),self.appearance_disabled(),):
-                anchor_logits, _anchor_prompt = (self.decode_from_features(features.encoder_stages,features.selected_feature,return_all_layers=False,))
+                (
+                    appearance_logits,
+                    _projected_unused,
+                    appearance_layers,
+                ) = self.decode_from_features(
+                    app_features.encoder_stages,
+                    app_features.selected_feature,
+                    return_all_layers=True,
+                )
+
+        # 必须放在 deep_supervision 上下文外面。
+        # 此时 decoder 恢复单输出模式，取到原始 VoxTell 的最高分辨率输出。
+        with (
+            torch.no_grad(),
+            self.lora_disabled(),
+            self.appearance_disabled(),
+        ):
+            anchor_logits, _anchor_prompt = self.decode_from_features(
+                features.encoder_stages,
+                features.selected_feature,
+                return_all_layers=False,
+            )
+
         if len(semantic_layers) <= 1 or len(appearance_layers) <= 1:
             raise RuntimeError(
-                "text_layer_ensemble requires multiple native VoxTell decoder outputs. "
-                "Check that decoder.deep_supervision is available and enabled for this path."
+                "text_layer_ensemble requires multiple native VoxTell "
+                "decoder outputs. Check that decoder.deep_supervision "
+                "is available and enabled for this path."
             )
-        semantic_layers = order_layers_high_to_low(semantic_layers)
-        appearance_layers = order_layers_high_to_low(appearance_layers)
+
+        semantic_layers = order_layers_high_to_low(
+            semantic_layers
+        )
+        appearance_layers = order_layers_high_to_low(
+            appearance_layers
+        )
+
         semantic_logits = semantic_layers[0]
         appearance_logits = appearance_layers[0]
-        semantic_prob = self._class_probs(semantic_logits)
-        appearance_prob = self._class_probs(appearance_logits)
-        target_shape = tuple(semantic_prob.shape[-3:])
-        anchor_prob = self._class_probs(anchor_logits).float()
-        if tuple(anchor_prob.shape[-3:]) != target_shape:
-            anchor_prob = F.interpolate(anchor_prob,size=target_shape,mode="trilinear",align_corners=False,)
-        anchor_prob = anchor_prob.detach().clamp(0, 1)
-        semantic_summary = summarize_layer_probs(self._class_probs(logits) for logits in appearance_layers], self.config, target_shape)
 
-        fused = fuse_text_layer_ensemble(semantic_summary, appearance_summary, self.config)
+        semantic_prob = self._class_probs(
+            semantic_logits
+        )
+        appearance_prob = self._class_probs(
+            appearance_logits
+        )
+
+        target_shape = tuple(
+            semantic_prob.shape[-3:]
+        )
+
+        anchor_prob = self._class_probs(
+            anchor_logits
+        ).float()
+
+        if tuple(anchor_prob.shape[-3:]) != target_shape:
+            anchor_prob = F.interpolate(
+                anchor_prob,
+                size=target_shape,
+                mode="trilinear",
+                align_corners=False,
+            )
+
+        anchor_prob = anchor_prob.detach().clamp(0, 1)
+
+        semantic_summary = summarize_layer_probs(
+            [
+                self._class_probs(logits)
+                for logits in semantic_layers
+            ],
+            self.config,
+            target_shape,
+        )
+
+        appearance_summary = summarize_layer_probs(
+            [
+                self._class_probs(logits)
+                for logits in appearance_layers
+            ],
+            self.config,
+            target_shape,
+        )
+
+        fused = fuse_text_layer_ensemble(
+            semantic_summary,
+            appearance_summary,
+            self.config,
+        )
         disagreement = (semantic_summary["p_mean"] - appearance_summary["p_mean"]).abs().clamp(0, 1)
         w_geo_coarse = build_text_layer_geometry_gate(
             fused["candidate_score"],
