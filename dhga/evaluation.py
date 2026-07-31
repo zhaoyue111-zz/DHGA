@@ -11,6 +11,7 @@ from tqdm import tqdm
 from dhga.config import DHGAConfig
 from dhga.geometry import mask_to_sdf
 from dhga.inference import finalize_probability, geometry_effective_gate
+from dhga.text_layer_ensemble import build_text_layer_geometry_gate
 from dhga.voxtell_model import build_dhga_voxtell_model
 from voxtell_sfda.adapter import foreground_dice_iou, load_split_manifest, match_label_path
 
@@ -125,6 +126,7 @@ class DHGAEvaluator:
         count = torch.zeros_like(sem_sum)
         text_layer_sums: dict[str, torch.Tensor] = {}
         text_candidate_sum = torch.zeros_like(sem_sum)
+        text_norm_disagreement_sum = torch.zeros_like(sem_sum)
         visual_sum = None
         self.model.eval()
         with torch.no_grad():
@@ -158,6 +160,8 @@ class DHGAEvaluator:
                         text_layer_sums[name][(slice(None), slice(None), *slicer[1:])] += prob
                     candidate = F.interpolate(out.layer_ensemble["candidate_score"], size=target_shape, mode="trilinear", align_corners=False)
                     text_candidate_sum[(slice(None), slice(None), *slicer[1:])] += candidate
+                    norm_dis = F.interpolate(out.layer_ensemble["normalized_disagreement"], size=target_shape, mode="trilinear", align_corners=False)
+                    text_norm_disagreement_sum[(slice(None), slice(None), *slicer[1:])] += norm_dis
                 count[(slice(None), slice(None), *slicer[1:])] += 1
                 visual = self.model.geometry_visual_proj(out.features.encoder_stages[self.model.geometry_feature_idx])
                 visual = F.interpolate(visual, size=target_shape, mode="trilinear", align_corners=False)
@@ -169,10 +173,12 @@ class DHGAEvaluator:
             visual_feature = visual_sum / count.clamp_min(1)
             router = self.model.router(sem_prob, app_prob, visual_context=visual_feature.mean(dim=1, keepdim=True))
             text_probs = {name: value / count.clamp_min(1) for name, value in text_layer_sums.items()}
+            text_norm_disagreement = None
             if text_probs:
                 final_text_prob = text_probs["text_candidate_enhanced"]
                 base_text_prob = text_probs["text_base_fusion"]
                 candidate_prob = text_candidate_sum / count.clamp_min(1)
+                text_norm_disagreement = text_norm_disagreement_sum / count.clamp_min(1)
                 router.fused_prob = final_text_prob
                 router.geometry_disagreement_weight = torch.maximum(router.geometry_disagreement_weight, candidate_prob.clamp(0, 1))
             else:
@@ -225,8 +231,18 @@ class DHGAEvaluator:
                     candidate_fg=(candidate_prob > 0).float() if candidate_prob is not None else None,
                 )
                 phi = mask_to_sdf(router.fused_prob >= self.config.pred_threshold, spacing)
+                if text_probs and candidate_prob is not None and text_norm_disagreement is not None:
+                    sdf_boundary_band = (phi.abs() <= float(self.config.dhga_geometry_boundary_band_mm)).to(dtype=candidate_prob.dtype)
+                    w_geo_eval = build_text_layer_geometry_gate(
+                        candidate_prob.clamp(0, 1),
+                        text_norm_disagreement.clamp(0, 1),
+                        sdf_boundary_band=sdf_boundary_band,
+                        config=self.config,
+                    )
+                    router.w_geo = w_geo_eval
+                    geometry["w_geo_eval"] = w_geo_eval.detach()
                 effective_gate = geometry.get("effective_gate")
-                if effective_gate is None:
+                if effective_gate is None or (text_probs and candidate_prob is not None and text_norm_disagreement is not None):
                     effective_gate = geometry_effective_gate(
                         router.w_geo,
                         (sem_prob - app_prob).abs().clamp(0, 1),

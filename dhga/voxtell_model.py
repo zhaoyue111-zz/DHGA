@@ -24,7 +24,7 @@ from dhga.geometry import (
 )
 from dhga.routing import DisagreementRouter, RouterOutput
 from dhga.shared_voxtell import SharedVoxTellFeatures, freeze_module, trainable_parameter_summary
-from dhga.text_layer_ensemble import fuse_text_layer_ensemble, highest_resolution_layer_index, order_layers_high_to_low, summarize_layer_probs
+from dhga.text_layer_ensemble import build_text_layer_geometry_gate, fuse_text_layer_ensemble, highest_resolution_layer_index, order_layers_high_to_low, summarize_layer_probs
 from voxtell_sfda.adapter import build_prompt_variants, load_prompts, prepare_voxtell_import
 from voxtell_sfda.lora import inject_lora_into_voxtell_decoder, mark_only_lora_trainable
 
@@ -283,6 +283,12 @@ class DHGAVoxTellModel(nn.Module):
         appearance_summary = summarize_layer_probs([self._class_probs(logits) for logits in appearance_layers], self.config, target_shape)
         fused = fuse_text_layer_ensemble(semantic_summary, appearance_summary, self.config)
         disagreement = (semantic_summary["p_mean"] - appearance_summary["p_mean"]).abs().clamp(0, 1)
+        w_geo_coarse = build_text_layer_geometry_gate(
+            fused["candidate_score"],
+            fused["normalized_disagreement"],
+            fused_prob=fused["p_final"],
+            config=self.config,
+        )
         router = RouterOutput(
             stable_foreground=fused["reliable_fg"],
             stable_background=fused["reliable_bg"],
@@ -293,7 +299,7 @@ class DHGAVoxTellModel(nn.Module):
             geometry_disagreement_weight=fused["candidate_score"].detach(),
             w_sem=fused["w_sem"],
             w_app=fused["w_app"],
-            w_geo=torch.zeros_like(fused["p_final"]),
+            w_geo=w_geo_coarse,
         )
         layer_ensemble = {
             **{f"semantic_{key}": value for key, value in semantic_summary.items()},
@@ -304,6 +310,7 @@ class DHGAVoxTellModel(nn.Module):
             "semantic_p_last": semantic_summary["p_last"],
             "appearance_p_last": appearance_summary["p_last"],
             "candidate_map_for_geometry": fused["candidate_score"].detach(),
+            "w_geo_coarse": w_geo_coarse.detach(),
         }
         geometry = {}
         final_prob = fused["p_final"]
@@ -322,6 +329,15 @@ class DHGAVoxTellModel(nn.Module):
             )
             if "dense_displacement_mm" in geometry:
                 sdf = mask_to_sdf(router.fused_prob >= self.config.pred_threshold, spacing)
+                sdf_boundary_band = (sdf.abs() <= float(self.config.dhga_geometry_boundary_band_mm)).to(dtype=fused["p_final"].dtype)
+                w_geo_final = build_text_layer_geometry_gate(
+                    fused["candidate_score"],
+                    fused["normalized_disagreement"],
+                    sdf_boundary_band=sdf_boundary_band,
+                    config=self.config,
+                )
+                router.w_geo = w_geo_final
+                geometry["w_geo_final"] = w_geo_final.detach()
                 final_prob = finalize_probability(
                     router.fused_prob,
                     sdf,

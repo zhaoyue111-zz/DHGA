@@ -1061,6 +1061,125 @@ class DHGAStaticTests(unittest.TestCase):
         self.assertIn("router.weight", trainable)
         self.assertIn("appearance_expert.weight", trainable)
 
+    def test_text_layer_ensemble_masks_are_pairwise_disjoint(self):
+        from dhga.text_layer_ensemble import fuse_text_layer_ensemble
+        config = DHGAConfig(
+            dhga_stage_b_method="text_layer_ensemble",
+            dhga_text_layer_foreground_support_threshold=0.0,
+            dhga_text_layer_disagreement_threshold=0.0,
+            dhga_text_layer_candidate_max_ratio=1.0,
+            dhga_text_layer_candidate_alpha=0.5,
+            dhga_text_layer_stability_threshold=1.0,
+            dhga_text_layer_reliable_bg_threshold=0.3,
+            dhga_text_layer_reliable_fg_threshold=0.7,
+        )
+        torch.manual_seed(7)
+        for shape in ((1, 1, 4, 4, 4), (1, 1, 8, 6, 10)):
+            p_mean_sem = torch.rand(*shape)
+            p_mean_app = torch.rand(*shape)
+            p_max_sem = torch.rand(*shape).clamp_min(p_mean_sem)
+            p_max_app = torch.rand(*shape).clamp_min(p_mean_app)
+            u_sem = torch.rand(*shape) * 0.5
+            u_app = torch.rand(*shape) * 0.5
+            sem = {"p_mean": p_mean_sem, "p_max": p_max_sem, "u_layer": u_sem}
+            app = {"p_mean": p_mean_app, "p_max": p_max_app, "u_layer": u_app}
+            fused = fuse_text_layer_ensemble(sem, app, config)
+            fg = fused["reliable_fg"] > 0.5
+            bg = fused["reliable_bg"] > 0.5
+            cands = fused["candidate_fg"] > 0.5
+            self.assertFalse(bool((fg & bg).any()), msg="reliable_fg and reliable_bg must be disjoint")
+            self.assertFalse(bool((fg & cands).any()), msg="reliable_fg and candidate_fg must be disjoint")
+            self.assertFalse(bool((bg & cands).any()), msg="reliable_bg and candidate_fg must be disjoint")
+            union = fg | bg | cands
+            ignored = ~union
+            self.assertTrue(bool((union | ignored).all()))
+
+    def test_stage_c_text_layer_ensemble_produces_nonzero_perturbation(self):
+        from dhga.geometry.boundary_corruption import make_local_boundary_corruption
+        config = DHGAConfig(
+            dhga_stage="C",
+            dhga_stage_b_method="text_layer_ensemble",
+            dhga_surface_tolerance_mm=2.0,
+            dhga_corruption_max_offset_mm=4.0,
+            dhga_corruption_modes=["inward", "outward"],
+        )
+        shape = (1, 1, 12, 12, 12)
+        spacing = (1.0, 1.0, 1.0)
+        mask = torch.zeros(shape, dtype=torch.bool)
+        mask[..., 4:8, 4:8, 4:8] = True
+        teacher_sdf = mask_to_sdf(mask, spacing)
+        boundary_band = (teacher_sdf.abs() <= config.dhga_surface_tolerance_mm * 3.0).float()
+        self.assertGreater(float(boundary_band.sum()), 10.0, "boundary_band must cover boundary voxels")
+        edge_ring = torch.zeros_like(boundary_band)
+        edge_ring[..., 3:9, 3:9, 3:9] = 1.0
+        edge_ring[..., 5:7, 5:7, 5:7] = 0.0
+        candidate_fg = edge_ring
+        stable_band = boundary_band * (candidate_fg > 0.5)
+        self.assertGreater(float(stable_band.sum()), 10.0,
+                           "stable_band must be non-empty where boundary_band intersects candidate_fg edge ring")
+        torch.manual_seed(0)
+        corrupted, recovery_target, choices = make_local_boundary_corruption(
+            teacher_sdf,
+            config.dhga_corruption_max_offset_mm,
+            config.dhga_corruption_modes,
+            stable_band=stable_band,
+        )
+        perturb = teacher_sdf - corrupted
+        nonzero_perturb = perturb.abs() > 1e-5
+        nonzero_recovery = recovery_target.abs() > 1e-5
+        self.assertTrue(bool(nonzero_perturb.any()),
+                        "perturb must be non-zero when stable_band is non-empty and zero-mode is disabled")
+        self.assertTrue(bool(nonzero_recovery.any()),
+                        "recovery_target must be non-zero when perturb is non-zero")
+        self.assertTrue(torch.allclose(recovery_target[nonzero_perturb], -perturb[nonzero_perturb]),
+                        "recovery_target must equal -perturb where perturb is non-zero")
+        overlap = (stable_band > 0.5) & nonzero_perturb
+        self.assertTrue(bool(overlap.any()),
+                        "non-zero perturbation must overlap the stable_band region")
+
+    def test_text_layer_geometry_gate_allows_displacement_to_change_final_prob(self):
+        from dhga.inference import finalize_probability
+        from dhga.text_layer_ensemble import build_text_layer_geometry_gate
+        config = DHGAConfig(
+            dhga_geometry_enabled=True,
+            dhga_geometry_boundary_band_mm=6.0,
+            dhga_geometry_max_displacement_mm=5.0,
+            dhga_ray_step_mm=1.0,
+            dhga_geometry_min_gate=0.0,
+            pred_threshold=0.5,
+        )
+        shape = (1, 1, 9, 9, 9)
+        spacing = (1.0, 1.0, 1.0)
+        z = torch.arange(shape[-3]).view(1, 1, -1, 1, 1).float()
+        z = z.expand(*shape)
+        fused_prob = torch.sigmoid(-(z - 4.0) * 3.0)
+        sdf = z - 4.0
+        candidate_score = torch.zeros_like(fused_prob)
+        candidate_score[..., 3:6, 3:6, 3:6] = 0.8
+        norm_dis = torch.zeros_like(fused_prob)
+        norm_dis[..., 3:6, 3:6, 3:6] = 0.7
+        boundary_band = (sdf.abs() <= float(config.dhga_geometry_boundary_band_mm)).float()
+        w_geo = build_text_layer_geometry_gate(candidate_score, norm_dis, sdf_boundary_band=boundary_band, config=config)
+        self.assertGreater(float(w_geo.max()), 0.0, "w_geo must be non-zero when candidate, disagreement, and boundary overlap")
+        self.assertLess(float(w_geo[0, 0, 0, 0, 0]), 1e-6, "w_geo must be zero outside the overlap")
+        disp = torch.zeros_like(fused_prob)
+        final_zero = finalize_probability(fused_prob, sdf, disp, w_geo, config)
+        self.assertTrue(torch.allclose(final_zero, fused_prob), "zero displacement must not change final_prob")
+        disp[..., 3:6, 3:6, 3:6] = 2.0
+        dense_valid = torch.ones_like(fused_prob)
+        expert_dis = torch.full_like(fused_prob, 0.6)
+        final_with_disp = finalize_probability(
+            fused_prob, sdf, disp, w_geo, config,
+            dense_valid_weight=dense_valid, expert_disagreement=expert_dis,
+        )
+        delta = (final_with_disp - fused_prob).abs()
+        self.assertGreater(float(delta.max()), 0.0,
+                           "non-zero displacement with non-zero w_geo must change final_prob")
+        voxel_active = (w_geo * expert_dis * boundary_band) > 0.01
+        self.assertTrue(bool((delta[voxel_active] > 1e-4).any()),
+                        "at active gate voxels, final_prob must differ from fused_prob")
+
+
     def test_synthetic_smoke(self):
         result = run_synthetic_smoke(DHGAConfig(), "cpu")
         self.assertEqual(result.shared_encoder_calls, 1)

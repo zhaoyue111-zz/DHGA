@@ -895,7 +895,18 @@ class DHGAStageTrainer:
             student_out = self.model(patch, spacing, run_geometry=False)
         if teacher_sdf is None:
             teacher_sdf = mask_to_sdf(teacher_out.router.fused_prob.detach() >= self.config.pred_threshold, spacing)
-        stable_band = (teacher_sdf.abs() <= self.config.dhga_surface_tolerance_mm * 3.0) * (teacher_out.router.cross_supervision_weight.detach() > 0)
+        boundary_band = (teacher_sdf.abs() <= self.config.dhga_surface_tolerance_mm * 3.0)
+        if teacher_out.layer_ensemble is not None:
+            teacher_candidate = teacher_out.layer_ensemble.get("candidate_fg", None)
+            if teacher_candidate is not None:
+                teacher_candidate = teacher_candidate.detach()
+                if teacher_candidate.shape[-3:] != boundary_band.shape[-3:]:
+                    teacher_candidate = F.interpolate(teacher_candidate.float(), size=boundary_band.shape[-3:], mode="trilinear", align_corners=False)
+                stable_band = boundary_band.to(dtype=teacher_candidate.dtype) * (teacher_candidate > 0.5)
+            else:
+                stable_band = boundary_band * (teacher_out.router.cross_supervision_weight.detach() > 0)
+        else:
+            stable_band = boundary_band * (teacher_out.router.cross_supervision_weight.detach() > 0)
         corrupted_sdf, recovery_target, choices = make_local_boundary_corruption(
             teacher_sdf,
             self.config.dhga_corruption_max_offset_mm,

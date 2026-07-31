@@ -126,7 +126,8 @@ def fuse_text_layer_ensemble(
     p_final = torch.minimum(p_final, p_max_all).clamp(0, 1)
 
     stable = disagreement <= float(config.dhga_text_layer_stability_threshold)
-    reliable_fg = (p_base >= float(config.dhga_text_layer_reliable_fg_threshold)) & stable
+    high_prob = p_base >= float(config.dhga_text_layer_reliable_fg_threshold)
+    reliable_fg = high_prob & stable & (~candidate_fg)
     reliable_bg = (p_base <= float(config.dhga_text_layer_reliable_bg_threshold)) & stable & (~candidate_fg)
     ignored = ~(reliable_fg | reliable_bg | candidate_fg)
     return {
@@ -191,6 +192,48 @@ def text_layer_training_loss(out, config: DHGAConfig, teacher_ensemble: dict[str
         "dhga_text_layer_ignore_ratio": _ratio(target_ens["ignored"].detach() > 0.5) if "ignored" in target_ens else 0.0,
     }
     return loss, metrics
+
+
+def build_text_layer_geometry_gate(
+    candidate_score: Tensor,
+    normalized_disagreement: Tensor,
+    sdf_boundary_band: Tensor | None = None,
+    fused_prob: Tensor | None = None,
+    config: DHGAConfig | None = None,
+    spacing: tuple[float, float, float] | None = None,
+) -> Tensor:
+    """Build explicit geometry gate for text_layer_ensemble.
+
+    w_geo = candidate_score * normalized_disagreement * boundary_mask.
+
+    If sdf_boundary_band is not provided but fused_prob is, a coarse boundary mask
+    is derived from |fused_prob - 0.5| being small.
+    """
+    if candidate_score.shape != normalized_disagreement.shape:
+        raise ValueError("candidate_score and normalized_disagreement must match in shape")
+    if sdf_boundary_band is None:
+        if fused_prob is not None:
+            coarse = (fused_prob - 0.5).abs()
+            sdf_boundary_band = (coarse <= 0.4).to(dtype=candidate_score.dtype)
+        else:
+            sdf_boundary_band = torch.ones_like(candidate_score)
+    else:
+        if sdf_boundary_band.shape != candidate_score.shape:
+            sdf_boundary_band = F.interpolate(
+                sdf_boundary_band.float(),
+                size=candidate_score.shape[-3:],
+                mode="trilinear",
+                align_corners=False,
+            )
+        sdf_boundary_band = sdf_boundary_band.to(dtype=candidate_score.dtype)
+    gate = (candidate_score * normalized_disagreement * sdf_boundary_band).clamp(0, 1)
+    if config is not None and float(getattr(config, "dhga_geometry_min_gate", 0.0)) > 0:
+        gate = torch.where(
+            gate > float(config.dhga_geometry_min_gate),
+            gate,
+            torch.zeros_like(gate),
+        )
+    return gate
 
 
 def _ratio(mask: Tensor) -> float:

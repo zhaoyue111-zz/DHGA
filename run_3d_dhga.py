@@ -38,6 +38,9 @@ ARCHITECTURE_KEYS = {
     "dhga_ray_step_mm",
     "dhga_max_boundary_points",
     "dhga_boundary_chunk_size",
+    "dhga_ema_warmup_steps",
+    "dhga_ema_decay",
+    "dhga_use_ema_teacher",
 }
 
 
@@ -88,6 +91,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dhga_appearance_feature_dropout", type=float, default=0.05)
     parser.add_argument("--dhga_use_ema_teacher", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--dhga_ema_decay", type=float, default=0.99)
+    parser.add_argument("--dhga_ema_warmup_steps", type=int, default=10)
     parser.add_argument("--dhga_anchor_weight", type=float, default=0.25)
     parser.add_argument("--dhga_appearance_anchor_weight", type=float, default=0.25)
     parser.add_argument("--dhga_appearance_expansion_weight", type=float, default=0.1)
@@ -197,6 +201,7 @@ def config_from_args(args: argparse.Namespace) -> DHGAConfig:
         dhga_appearance_feature_dropout=args.dhga_appearance_feature_dropout,
         dhga_use_ema_teacher=args.dhga_use_ema_teacher,
         dhga_ema_decay=args.dhga_ema_decay,
+        dhga_ema_warmup_steps=args.dhga_ema_warmup_steps,
         dhga_anchor_weight=args.dhga_anchor_weight,
         dhga_appearance_anchor_weight=args.dhga_appearance_anchor_weight,
         dhga_appearance_expansion_weight=args.dhga_appearance_expansion_weight,
