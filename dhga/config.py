@@ -33,7 +33,7 @@ class DHGAConfig:
     dhga_validation_interval_epochs: int = 2
     init_checkpoint: str = ""
     resume_checkpoint: str = ""
-    dhga_ema_warmup_steps: int = 10
+    dhga_ema_warmup_steps: int = 600
     dhga_enabled: bool = True
     dhga_stage: str = "B"
     dhga_freeze_voxtell: bool = True
@@ -43,7 +43,7 @@ class DHGAConfig:
     dhga_appearance_hidden_ratio: float = 0.25
     dhga_appearance_feature_dropout: float = 0.05
     dhga_use_ema_teacher: bool = True
-    dhga_ema_decay: float = 0.99
+    dhga_ema_decay: float = 0.9995
     dhga_anchor_weight: float = 0.25
     dhga_appearance_anchor_weight: float = 0.25
     dhga_appearance_expansion_weight: float = 0.1
@@ -55,13 +55,13 @@ class DHGAConfig:
     dhga_text_layer_weights: list[float] = field(default_factory=list)
     dhga_text_layer_temperature: float = 0.1
     dhga_text_layer_foreground_support_threshold: float = 0.5
-    dhga_text_layer_candidate_max_ratio: float = 0.1
-    dhga_text_layer_candidate_alpha: float = 0.2
+    dhga_text_layer_candidate_max_ratio: float = 0.05
+    dhga_text_layer_candidate_alpha: float = 0.0
     dhga_text_layer_disagreement_threshold: float = 0.05
     dhga_text_layer_stability_threshold: float = 0.08
     dhga_text_layer_reliable_fg_threshold: float = 0.8
     dhga_text_layer_reliable_bg_threshold: float = 0.2
-    dhga_text_layer_candidate_weight: float = 0.1
+    dhga_text_layer_candidate_weight: float = 0.0
     dhga_geometry_enabled: bool = True
     dhga_search_radius_mm: float = 6.0
     dhga_surface_tolerance_mm: float = 1.0

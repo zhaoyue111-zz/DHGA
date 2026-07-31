@@ -405,7 +405,9 @@ class DHGAStageTrainer:
                                 self.scaler.step(self.optimizer)
                                 self.scaler.update()
                                 self.global_step += 1
-                                if self.teacher is not None:
+                                # warmup 内保持 EMA shadow 为初始化模型，
+                                # 不允许 teacher 跟随正在漂移的 student。
+                                if (self.teacher is not None and self.global_step >= self.config.dhga_ema_warmup_steps):
                                     self.teacher.update(self.model)
                             record = {"epoch": epoch + 1, "case": str(path), **metrics}
                             record["patch_kind"] = patch_kind
@@ -740,7 +742,7 @@ class DHGAStageTrainer:
         was_training = module.training
         module.eval()
         with torch.no_grad():
-            if self.teacher is not None and self.global_step >= self.config.dhga_ema_warmup_steps:
+            if self.teacher is not None:
                 with self.teacher.apply_to(module):
                     out = module(patch, spacing, run_geometry=run_geometry)
             else:
@@ -765,7 +767,7 @@ class DHGAStageTrainer:
         out = self.model.forward_text_layer_ensemble(strong, spacing, run_geometry=False) if hasattr(self.model, "forward_text_layer_ensemble") else self.model(strong, spacing, run_geometry=False)
         if teacher_out.layer_ensemble is None:
             raise RuntimeError("text_layer_ensemble Stage B requires teacher layer_ensemble outputs")
-        loss, metrics = text_layer_training_loss(out, self.config, teacher_out.layer_ensemble)
+        loss, metrics = text_layer_training_loss(out, self.config, teacher_out.layer_ensemble,anchor_prob=teacher_out.anchor_prob,)
         ens = out.layer_ensemble or {}
         teacher_ens = teacher_out.layer_ensemble or {}
         sem_layers = ens.get("semantic_layer_probs")
@@ -798,6 +800,9 @@ class DHGAStageTrainer:
         metrics["dhga_text_layer_method_enabled"] = 1.0
         metrics["dhga_text_layer_legacy_anchor_loss_active"] = 0.0
         metrics["dhga_text_layer_legacy_router_loss_active"] = 0.0
+        metrics["dhga_text_layer_anchor_guard_active"] = 1.0
+        metrics["dhga_text_layer_volume_guard_active"] = 1.0
+        metrics["dhga_text_layer_candidate_supervision_active"] = 0.0
         metrics["loss"] = float(loss.detach().cpu())
         return loss, metrics
 
