@@ -25,16 +25,7 @@ def spacing_from_reader_properties(props: dict) -> tuple[float, float, float]:
 
 
 class DHGAEvaluator:
-    def __init__(
-        self,
-        config: DHGAConfig,
-        prompts: list[str],
-        save_dir: str | Path,
-        label_dir: str = "",
-        label_values: list[int] | None = None,
-        model=None,
-        predictor=None,
-    ) -> None:
+    def __init__(self, config: DHGAConfig, prompts: list[str], save_dir: str | Path, label_dir: str = "", label_values: list[int] | None = None, model=None, predictor=None) -> None:
         self.config = config
         self.save_dir = Path(save_dir)
         self.save_dir.mkdir(parents=True, exist_ok=True)
@@ -44,7 +35,6 @@ class DHGAEvaluator:
             self.model, self.predictor, self.prompts = model, predictor, prompts
         if model is None and (config.init_checkpoint or config.resume_checkpoint):
             from dhga.checkpoint import load_training_checkpoint
-
             load_training_checkpoint(config.resume_checkpoint or config.init_checkpoint, self.model, load_training_state=False)
         self.device = next(self.model.parameters()).device
         self.label_dir = label_dir
@@ -52,7 +42,6 @@ class DHGAEvaluator:
         from acvl_utils.cropping_and_padding.bounding_boxes import insert_crop_into_image
         from acvl_utils.cropping_and_padding.padding import pad_nd_image
         from nnunetv2.imageio.nibabel_reader_writer import NibabelIOWithReorient
-
         self.reader = NibabelIOWithReorient()
         self.pad_nd_image = pad_nd_image
         self.insert_crop_into_image = insert_crop_into_image
@@ -64,6 +53,7 @@ class DHGAEvaluator:
         rows = []
         for path in tqdm(paths, desc="DHGA evaluation-only", dynamic_ncols=True):
             probs, image_props = self.predict_case(path)
+            spacing = spacing_from_reader_properties(image_props)
             pred = probs[0] >= self.config.pred_threshold
             row = {"case": path.name, "pred_voxels": int(pred.sum()), **getattr(self, "last_case_diagnostics", {})}
             if self.label_dir:
@@ -81,33 +71,36 @@ class DHGAEvaluator:
                     row[f"{metric_name}_iou"] = aux["iou"]
                     row[f"{metric_name}_precision"] = aux["precision"]
                     row[f"{metric_name}_recall"] = aux["recall"]
-                row.update(compute_geometry_case_metrics(fused_pred, pred, gt, spacing_from_reader_properties(image_props), self.config.dhga_surface_tolerance_mm))
+                row.update(compute_geometry_case_metrics(fused_pred, pred, gt, spacing, self.config.dhga_surface_tolerance_mm))
                 raw_disagreement = getattr(self, "last_raw_disagreement", None)
                 if raw_disagreement is not None:
-                    row.update(
-                        compute_raw_disagreement_metrics(
-                            raw_disagreement,
-                            semantic_pred=sem_pred,
-                            appearance_pred=app_pred,
-                            gt=gt,
-                            spacing=spacing_from_reader_properties(image_props),
-                        )
-                    )
+                    row.update(compute_raw_disagreement_metrics(raw_disagreement, semantic_pred=sem_pred, appearance_pred=app_pred, gt=gt, spacing=spacing))
+                directional_primary_pred = getattr(self, "last_directional_primary_pred", None)
+                expand_score = getattr(self, "last_candidate_expand_score", None)
+                shrink_score = getattr(self, "last_candidate_shrink_score", None)
+                if directional_primary_pred is not None and expand_score is not None and shrink_score is not None:
+                    row.update(compute_directional_candidate_metrics(directional_primary_pred, gt, expand_score, shrink_score, spacing, self.config.dhga_geometry_boundary_band_mm))
             rows.append(row)
-            out_name = path.name.replace(".nii.gz", "").replace(".nii", "") + "_dhga.nii.gz"
-            self.reader.write_seg(pred.astype(np.uint8), str(self.save_dir / out_name), image_props)
+            case_base = path.name.replace(".nii.gz", "").replace(".nii", "")
+            self.reader.write_seg(pred.astype(np.uint8), str(self.save_dir / f"{case_base}_dhga.nii.gz"), image_props)
             raw_disagreement = getattr(self, "last_raw_disagreement", None)
             if raw_disagreement is not None:
-                raw_base = path.name.replace(".nii.gz", "").replace(".nii", "") + "_raw_disagreement"
-                np.save(self.save_dir / f"{raw_base}.npy", raw_disagreement.astype(np.float32, copy=False))
-                write_float_volume_like_reader(raw_disagreement.astype(np.float32, copy=False), str(self.save_dir / f"{raw_base}.nii.gz"), image_props)
+                np.save(self.save_dir / f"{case_base}_raw_disagreement.npy", raw_disagreement.astype(np.float32, copy=False))
+                write_float_volume_like_reader(raw_disagreement.astype(np.float32, copy=False), str(self.save_dir / f"{case_base}_raw_disagreement.nii.gz"), image_props)
+            if self.config.dhga_debug_outputs:
+                directional_primary_pred = getattr(self, "last_directional_primary_pred", None)
+                expand_score = getattr(self, "last_candidate_expand_score", None)
+                shrink_score = getattr(self, "last_candidate_shrink_score", None)
+                if directional_primary_pred is not None:
+                    self.reader.write_seg(directional_primary_pred.astype(np.uint8), str(self.save_dir / f"{case_base}_directional_primary.nii.gz"), image_props)
+                if expand_score is not None:
+                    np.save(self.save_dir / f"{case_base}_candidate_expand_score.npy", expand_score.astype(np.float32, copy=False))
+                    write_float_volume_like_reader(expand_score.astype(np.float32, copy=False), str(self.save_dir / f"{case_base}_candidate_expand_score.nii.gz"), image_props)
+                if shrink_score is not None:
+                    np.save(self.save_dir / f"{case_base}_candidate_shrink_score.npy", shrink_score.astype(np.float32, copy=False))
+                    write_float_volume_like_reader(shrink_score.astype(np.float32, copy=False), str(self.save_dir / f"{case_base}_candidate_shrink_score.nii.gz"), image_props)
         metrics = {"rows": rows}
-        numeric_keys = sorted({
-            key
-            for row in rows
-            for key, value in row.items()
-            if isinstance(value, (int, float, np.integer, np.floating))
-        })
+        numeric_keys = sorted({key for row in rows for key, value in row.items() if isinstance(value, (int, float, np.integer, np.floating))})
         for key in numeric_keys:
             values = [float(row[key]) for row in rows if key in row]
             metrics[f"mean_{key}"] = float(np.mean(values)) if values else None
@@ -127,6 +120,12 @@ class DHGAEvaluator:
         text_layer_sums: dict[str, torch.Tensor] = {}
         text_candidate_sum = torch.zeros_like(sem_sum)
         text_norm_disagreement_sum = torch.zeros_like(sem_sum)
+        directional_primary_sum = torch.zeros_like(sem_sum)
+        directional_expand_score_sum = torch.zeros_like(sem_sum)
+        directional_shrink_score_sum = torch.zeros_like(sem_sum)
+        directional_expand_raw_sum = torch.zeros_like(sem_sum)
+        directional_shrink_raw_sum = torch.zeros_like(sem_sum)
+        has_directional = False
         visual_sum = None
         self.model.eval()
         with torch.no_grad():
@@ -142,12 +141,7 @@ class DHGAEvaluator:
                 sem_sum[(slice(None), slice(None), *slicer[1:])] += sem
                 app_sum[(slice(None), slice(None), *slicer[1:])] += app
                 if out.layer_ensemble is not None:
-                    for name, key in (
-                        ("text_last_layer", "last_layer_prob"),
-                        ("text_layer_mean", "layer_mean_prob"),
-                        ("text_base_fusion", "p_base"),
-                        ("text_candidate_enhanced", "p_final"),
-                    ):
+                    for name, key in (("text_last_layer", "last_layer_prob"), ("text_layer_mean", "layer_mean_prob"), ("text_base_fusion", "p_base"), ("text_candidate_enhanced", "p_final")):
                         if key == "last_layer_prob":
                             prob = 0.5 * (out.layer_ensemble["semantic_p_last"] + out.layer_ensemble["appearance_p_last"])
                         elif key == "layer_mean_prob":
@@ -162,6 +156,19 @@ class DHGAEvaluator:
                     text_candidate_sum[(slice(None), slice(None), *slicer[1:])] += candidate
                     norm_dis = F.interpolate(out.layer_ensemble["normalized_disagreement"], size=target_shape, mode="trilinear", align_corners=False)
                     text_norm_disagreement_sum[(slice(None), slice(None), *slicer[1:])] += norm_dis
+                    directional_keys = ("directional_primary_prob", "candidate_expand_score", "candidate_shrink_score", "candidate_expand_raw", "candidate_shrink_raw")
+                    if all(key in out.layer_ensemble for key in directional_keys):
+                        has_directional = True
+                        directional_primary = F.interpolate(out.layer_ensemble["directional_primary_prob"], size=target_shape, mode="trilinear", align_corners=False)
+                        expand_score = F.interpolate(out.layer_ensemble["candidate_expand_score"], size=target_shape, mode="trilinear", align_corners=False)
+                        shrink_score = F.interpolate(out.layer_ensemble["candidate_shrink_score"], size=target_shape, mode="trilinear", align_corners=False)
+                        expand_raw = F.interpolate(out.layer_ensemble["candidate_expand_raw"], size=target_shape, mode="nearest")
+                        shrink_raw = F.interpolate(out.layer_ensemble["candidate_shrink_raw"], size=target_shape, mode="nearest")
+                        directional_primary_sum[(slice(None), slice(None), *slicer[1:])] += directional_primary
+                        directional_expand_score_sum[(slice(None), slice(None), *slicer[1:])] += expand_score
+                        directional_shrink_score_sum[(slice(None), slice(None), *slicer[1:])] += shrink_score
+                        directional_expand_raw_sum[(slice(None), slice(None), *slicer[1:])] += expand_raw
+                        directional_shrink_raw_sum[(slice(None), slice(None), *slicer[1:])] += shrink_raw
                 count[(slice(None), slice(None), *slicer[1:])] += 1
                 visual = self.model.geometry_visual_proj(out.features.encoder_stages[self.model.geometry_feature_idx])
                 visual = F.interpolate(visual, size=target_shape, mode="trilinear", align_corners=False)
@@ -174,6 +181,11 @@ class DHGAEvaluator:
             router = self.model.router(sem_prob, app_prob, visual_context=visual_feature.mean(dim=1, keepdim=True))
             text_probs = {name: value / count.clamp_min(1) for name, value in text_layer_sums.items()}
             text_norm_disagreement = None
+            directional_primary_prob = directional_primary_sum / count.clamp_min(1) if has_directional else None
+            candidate_expand_score = directional_expand_score_sum / count.clamp_min(1) if has_directional else None
+            candidate_shrink_score = directional_shrink_score_sum / count.clamp_min(1) if has_directional else None
+            candidate_expand_raw = directional_expand_raw_sum / count.clamp_min(1) if has_directional else None
+            candidate_shrink_raw = directional_shrink_raw_sum / count.clamp_min(1) if has_directional else None
             if text_probs:
                 final_text_prob = text_probs["text_candidate_enhanced"]
                 base_text_prob = text_probs["text_base_fusion"]
@@ -211,68 +223,34 @@ class DHGAEvaluator:
                 "geometry_gate_high_disagreement_mean": _masked_tensor_mean(router.w_geo, disagreement_region),
             }
             if text_probs:
-                self.last_case_diagnostics.update({
-                    "text_layer_candidate_ratio": float((candidate_prob > 0).float().mean().cpu()),
-                    "text_layer_base_pred_volume": float((base_text_prob >= self.config.pred_threshold).float().mean().cpu()),
-                    "text_layer_enhanced_pred_volume": float((final_text_prob >= self.config.pred_threshold).float().mean().cpu()),
-                })
+                self.last_case_diagnostics.update({"text_layer_candidate_ratio": float((candidate_prob > 0).float().mean().cpu()), "text_layer_base_pred_volume": float((base_text_prob >= self.config.pred_threshold).float().mean().cpu()), "text_layer_enhanced_pred_volume": float((final_text_prob >= self.config.pred_threshold).float().mean().cpu())})
+            if has_directional:
+                self.last_case_diagnostics.update({"directional_expand_raw_ratio_patch_space": float((candidate_expand_raw > 0.5).float().mean().cpu()), "directional_shrink_raw_ratio_patch_space": float((candidate_shrink_raw > 0.5).float().mean().cpu())})
             geometry_stats = {}
             if self.config.dhga_geometry_enabled:
-                geometry = self.model.run_geometry(
-                    data_t,
-                    sem_prob,
-                    app_prob,
-                    router,
-                    self.model.text_embeddings,
-                    spacing,
-                    visual_feature=visual_feature,
-                    visual_feature_is_projected=True,
-                    candidate_score=candidate_prob,
-                    candidate_fg=(candidate_prob > 0).float() if candidate_prob is not None else None,
-                )
+                geometry = self.model.run_geometry(data_t, sem_prob, app_prob, router, self.model.text_embeddings, spacing, visual_feature=visual_feature, visual_feature_is_projected=True, candidate_score=candidate_prob, candidate_fg=(candidate_prob > 0).float() if candidate_prob is not None else None)
                 phi = mask_to_sdf(router.fused_prob >= self.config.pred_threshold, spacing)
                 if text_probs and candidate_prob is not None and text_norm_disagreement is not None:
                     sdf_boundary_band = (phi.abs() <= float(self.config.dhga_geometry_boundary_band_mm)).to(dtype=candidate_prob.dtype)
-                    w_geo_eval = build_text_layer_geometry_gate(
-                        candidate_prob.clamp(0, 1),
-                        text_norm_disagreement.clamp(0, 1),
-                        sdf_boundary_band=sdf_boundary_band,
-                        config=self.config,
-                    )
+                    w_geo_eval = build_text_layer_geometry_gate(candidate_prob.clamp(0, 1), text_norm_disagreement.clamp(0, 1), sdf_boundary_band=sdf_boundary_band, config=self.config)
                     router.w_geo = w_geo_eval
                     geometry["w_geo_eval"] = w_geo_eval.detach()
                 effective_gate = geometry.get("effective_gate")
                 if effective_gate is None or (text_probs and candidate_prob is not None and text_norm_disagreement is not None):
-                    effective_gate = geometry_effective_gate(
-                        router.w_geo,
-                        (sem_prob - app_prob).abs().clamp(0, 1),
-                        phi,
-                        self.config,
-                        geometry.get("dense_valid_weight"),
-                        geometry["dense_displacement_mm"],
-                    )
-                final = finalize_probability(
-                    router.fused_prob,
-                    phi,
-                    geometry["dense_displacement_mm"],
-                    router.w_geo,
-                    self.config,
-                    geometry.get("dense_valid_weight"),
-                    expert_disagreement=(sem_prob - app_prob).abs().clamp(0, 1),
-                )
+                    effective_gate = geometry_effective_gate(router.w_geo, (sem_prob - app_prob).abs().clamp(0, 1), phi, self.config, geometry.get("dense_valid_weight"), geometry["dense_displacement_mm"])
+                final = finalize_probability(router.fused_prob, phi, geometry["dense_displacement_mm"], router.w_geo, self.config, geometry.get("dense_valid_weight"), expert_disagreement=(sem_prob - app_prob).abs().clamp(0, 1))
                 geometry_stats = summarize_geometry_tensors(geometry["dense_displacement_mm"], effective_gate, router.fused_prob, final, self.config.pred_threshold)
             else:
-                geometry = None
                 final = final_text_prob if final_text_prob is not None else router.fused_prob
         final = final[(slice(None), slice(None), *slicer_revert_padding[1:])].cpu().numpy()[0]
         fused_crop = router.fused_prob[(slice(None), slice(None), *slicer_revert_padding[1:])].cpu().numpy()[0]
         sem_crop = sem_prob[(slice(None), slice(None), *slicer_revert_padding[1:])].cpu().numpy()[0]
         app_crop = app_prob[(slice(None), slice(None), *slicer_revert_padding[1:])].cpu().numpy()[0]
         reverted = np.zeros((final.shape[0], *orig_shape), dtype=np.float32)
-        reverted = self.insert_crop_into_image(reverted, final, bbox)
         fused_reverted = np.zeros((fused_crop.shape[0], *orig_shape), dtype=np.float32)
         sem_reverted = np.zeros((sem_crop.shape[0], *orig_shape), dtype=np.float32)
         app_reverted = np.zeros((app_crop.shape[0], *orig_shape), dtype=np.float32)
+        reverted = self.insert_crop_into_image(reverted, final, bbox)
         fused_reverted = self.insert_crop_into_image(fused_reverted, fused_crop, bbox)
         sem_reverted = self.insert_crop_into_image(sem_reverted, sem_crop, bbox)
         app_reverted = self.insert_crop_into_image(app_reverted, app_crop, bbox)
@@ -282,6 +260,22 @@ class DHGAEvaluator:
             restored = np.zeros((crop.shape[0], *orig_shape), dtype=np.float32)
             restored = self.insert_crop_into_image(restored, crop, bbox)
             self.last_text_layer_preds[name] = restored[0] >= self.config.pred_threshold
+        self.last_directional_primary_pred = None
+        self.last_candidate_expand_score = None
+        self.last_candidate_shrink_score = None
+        self.last_candidate_expand_raw = None
+        self.last_candidate_shrink_raw = None
+        if has_directional and directional_primary_prob is not None and candidate_expand_score is not None and candidate_shrink_score is not None:
+            directional_primary_reverted = _restore_tensor_to_original(directional_primary_prob, slicer_revert_padding, bbox, orig_shape, self.insert_crop_into_image)
+            expand_score_reverted = _restore_tensor_to_original(candidate_expand_score, slicer_revert_padding, bbox, orig_shape, self.insert_crop_into_image)
+            shrink_score_reverted = _restore_tensor_to_original(candidate_shrink_score, slicer_revert_padding, bbox, orig_shape, self.insert_crop_into_image)
+            expand_raw_reverted = _restore_tensor_to_original(candidate_expand_raw, slicer_revert_padding, bbox, orig_shape, self.insert_crop_into_image)
+            shrink_raw_reverted = _restore_tensor_to_original(candidate_shrink_raw, slicer_revert_padding, bbox, orig_shape, self.insert_crop_into_image)
+            self.last_directional_primary_pred = directional_primary_reverted >= self.config.pred_threshold
+            self.last_candidate_expand_score = expand_score_reverted.astype(np.float32, copy=False)
+            self.last_candidate_shrink_score = shrink_score_reverted.astype(np.float32, copy=False)
+            self.last_candidate_expand_raw = expand_raw_reverted >= 0.5
+            self.last_candidate_shrink_raw = shrink_raw_reverted >= 0.5
         self.last_raw_disagreement = np.abs(sem_reverted[0].astype(np.float32) - app_reverted[0].astype(np.float32))
         self.last_fused_pred = fused_reverted[0] >= self.config.pred_threshold
         self.last_semantic_pred = sem_reverted[0] >= self.config.pred_threshold
@@ -290,10 +284,16 @@ class DHGAEvaluator:
         return reverted, props
 
 
+def _restore_tensor_to_original(prob: torch.Tensor, slicer_revert_padding, bbox, orig_shape, insert_crop_into_image) -> np.ndarray:
+    crop = prob[(slice(None), slice(None), *slicer_revert_padding[1:])].detach().cpu().numpy()[0]
+    restored = np.zeros((crop.shape[0], *orig_shape), dtype=np.float32)
+    restored = insert_crop_into_image(restored, crop, bbox)
+    return restored[0]
+
+
 def connected_components_3d(mask: np.ndarray) -> int:
     try:
         from scipy import ndimage
-
         _, count = ndimage.label(mask.astype(bool))
         return int(count)
     except Exception:
@@ -329,10 +329,9 @@ def _masked_tensor_mean(values: torch.Tensor, mask: torch.Tensor) -> float:
 def write_float_volume_like_reader(volume: np.ndarray, output_fname: str, properties: dict) -> None:
     import nibabel
     from nibabel.orientations import axcodes2ornt, io_orientation, ornt_transform
-
     volume = np.asarray(volume, dtype=np.float32)
     if volume.ndim != 3:
-        raise ValueError("raw disagreement volume must have shape [D, H, W]")
+        raise ValueError("float volume must have shape [D, H, W]")
     restored = volume.transpose((2, 1, 0))
     img = nibabel.Nifti1Image(restored, affine=properties["nibabel_stuff"]["reoriented_affine"])
     img_ornt = io_orientation(properties["nibabel_stuff"]["original_affine"])
@@ -342,29 +341,14 @@ def write_float_volume_like_reader(volume: np.ndarray, output_fname: str, proper
     nibabel.save(img_reoriented, output_fname)
 
 
-def compute_binary_case_metrics(
-    pred: np.ndarray,
-    gt: np.ndarray,
-    semantic_pred: np.ndarray | None = None,
-    appearance_pred: np.ndarray | None = None,
-) -> dict[str, float | int]:
+def compute_binary_case_metrics(pred: np.ndarray, gt: np.ndarray, semantic_pred: np.ndarray | None = None, appearance_pred: np.ndarray | None = None) -> dict[str, float | int]:
     pred = pred.astype(bool)
     gt = gt.astype(bool)
     base = _binary_metric_values(pred, gt)
     pred_voxels = int(pred.sum())
     gt_voxels = int(gt.sum())
     metrics: dict[str, float | int] = {
-        "dice": base["dice"],
-        "iou": base["iou"],
-        "precision": base["precision"],
-        "recall": base["recall"],
-        "tp_voxels": int(base["tp_voxels"]),
-        "fp_voxels": int(base["fp_voxels"]),
-        "fn_voxels": int(base["fn_voxels"]),
-        "fused_dice": base["dice"],
-        "gt_voxels": gt_voxels,
-        "pred_gt_volume_ratio": float(pred_voxels / max(gt_voxels, 1)),
-        "connected_components": connected_components_3d(pred),
+        "dice": base["dice"], "iou": base["iou"], "precision": base["precision"], "recall": base["recall"], "tp_voxels": int(base["tp_voxels"]), "fp_voxels": int(base["fp_voxels"]), "fn_voxels": int(base["fn_voxels"]), "fused_dice": base["dice"], "gt_voxels": gt_voxels, "pred_gt_volume_ratio": float(pred_voxels / max(gt_voxels, 1)), "connected_components": connected_components_3d(pred),
     }
     if semantic_pred is not None and appearance_pred is not None:
         semantic_pred = semantic_pred.astype(bool)
@@ -375,44 +359,78 @@ def compute_binary_case_metrics(
         oracle_intersection = np.logical_and(semantic_pred, appearance_pred)
         union_dice, union_iou = foreground_dice_iou(oracle_union, gt)
         intersection_dice, intersection_iou = foreground_dice_iou(oracle_intersection, gt)
-        metrics.update({
-            "semantic_dice": sem["dice"],
-            "semantic_iou": sem["iou"],
-            "semantic_precision": sem["precision"],
-            "semantic_recall": sem["recall"],
-            "appearance_dice": app["dice"],
-            "appearance_iou": app["iou"],
-            "appearance_precision": app["precision"],
-            "appearance_recall": app["recall"],
-            "oracle_union_dice": union_dice,
-            "oracle_union_iou": union_iou,
-            "oracle_intersection_dice": intersection_dice,
-            "oracle_intersection_iou": intersection_iou,
-        })
+        metrics.update({"semantic_dice": sem["dice"], "semantic_iou": sem["iou"], "semantic_precision": sem["precision"], "semantic_recall": sem["recall"], "appearance_dice": app["dice"], "appearance_iou": app["iou"], "appearance_precision": app["precision"], "appearance_recall": app["recall"], "oracle_union_dice": union_dice, "oracle_union_iou": union_iou, "oracle_intersection_dice": intersection_dice, "oracle_intersection_iou": intersection_iou})
     return metrics
 
 
-def compute_raw_disagreement_metrics(
-    raw_disagreement: np.ndarray,
-    semantic_pred: np.ndarray | None = None,
-    appearance_pred: np.ndarray | None = None,
-    gt: np.ndarray | None = None,
-    spacing: tuple[float, float, float] = (1.0, 1.0, 1.0),
-    boundary_band_mm: float = 2.0,
-) -> dict[str, float]:
+def compute_directional_candidate_metrics(primary_pred: np.ndarray, gt: np.ndarray, expand_score: np.ndarray, shrink_score: np.ndarray, spacing: tuple[float, float, float], boundary_band_mm: float) -> dict[str, float | int]:
+    primary = np.asarray(primary_pred, dtype=bool)
+    gt = np.asarray(gt, dtype=bool)
+    expand_score = np.asarray(expand_score, dtype=np.float32)
+    shrink_score = np.asarray(shrink_score, dtype=np.float32)
+    if primary.shape != gt.shape or expand_score.shape != gt.shape or shrink_score.shape != gt.shape:
+        raise ValueError("directional candidate arrays and gt must have identical shapes")
+    boundary = gt_boundary_band(primary, spacing, boundary_band_mm)
+    expand_region = boundary & (~primary)
+    shrink_region = boundary & primary
+    boundary_fn = expand_region & gt
+    boundary_fp = shrink_region & (~gt)
+    metrics: dict[str, float | int] = {
+        "directional_expand_raw_ratio": float((expand_score > 0).mean()) if expand_score.size else 0.0,
+        "directional_shrink_raw_ratio": float((shrink_score > 0).mean()) if shrink_score.size else 0.0,
+        "directional_expand_boundary_candidate_ratio": float(((expand_score > 0) & expand_region).sum() / max(int(expand_region.sum()), 1)),
+        "directional_shrink_boundary_candidate_ratio": float(((shrink_score > 0) & shrink_region).sum() / max(int(shrink_region.sum()), 1)),
+        "directional_boundary_fn_ratio": float(boundary_fn.sum() / max(int(expand_region.sum()), 1)),
+        "directional_boundary_fp_ratio": float(boundary_fp.sum() / max(int(shrink_region.sum()), 1)),
+        "directional_boundary_voxel_ratio": float(boundary.mean()) if boundary.size else 0.0,
+        "directional_boundary_fn_voxels": int(boundary_fn.sum()),
+        "directional_boundary_fp_voxels": int(boundary_fp.sum()),
+    }
+    for ratio, suffix in ((0.01, "top01"), (0.02, "top02"), (0.05, "top05")):
+        metrics.update(_directional_top_metrics(expand_score, expand_region, boundary_fn, ratio, f"directional_expand_{suffix}", "boundary_fn"))
+        metrics.update(_directional_top_metrics(shrink_score, shrink_region, boundary_fp, ratio, f"directional_shrink_{suffix}", "boundary_fp"))
+    return metrics
+
+
+def _directional_top_metrics(score: np.ndarray, eligible: np.ndarray, error_mask: np.ndarray, ratio: float, prefix: str, error_name: str) -> dict[str, float | int]:
+    score = np.asarray(score, dtype=np.float32)
+    eligible = np.asarray(eligible, dtype=bool)
+    error_mask = np.asarray(error_mask, dtype=bool)
+    eligible_count = int(eligible.sum())
+    error_count = int(error_mask.sum())
+    baseline = float(error_count / eligible_count) if eligible_count else 0.0
+    positive_indices = np.flatnonzero((eligible & (score > 0)).ravel())
+    target_count = max(1, int(np.ceil(eligible_count * float(ratio)))) if eligible_count else 0
+    selected_count = min(target_count, int(positive_indices.size))
+    selected = np.zeros(score.size, dtype=bool)
+    if selected_count > 0:
+        positive_scores = score.ravel()[positive_indices]
+        if selected_count == positive_indices.size:
+            chosen = positive_indices
+        else:
+            chosen_local = np.argpartition(positive_scores, -selected_count)[-selected_count:]
+            chosen = positive_indices[chosen_local]
+        selected[chosen] = True
+    selected = selected.reshape(score.shape)
+    hits = int((selected & error_mask).sum())
+    hit_rate = float(hits / selected_count) if selected_count else 0.0
+    coverage = float(hits / error_count) if error_count else 0.0
+    lift = float(hit_rate / baseline) if baseline > 0 else 0.0
+    return {f"{prefix}_hit_rate": hit_rate, f"{prefix}_{error_name}_coverage": coverage, f"{prefix}_lift": lift, f"{prefix}_selected_voxels": selected_count, f"{prefix}_selected_region_ratio": float(selected_count / eligible_count) if eligible_count else 0.0}
+
+
+def compute_raw_disagreement_metrics(raw_disagreement: np.ndarray, semantic_pred: np.ndarray | None = None, appearance_pred: np.ndarray | None = None, gt: np.ndarray | None = None, spacing: tuple[float, float, float] = (1.0, 1.0, 1.0), boundary_band_mm: float = 2.0) -> dict[str, float]:
     raw = np.asarray(raw_disagreement, dtype=np.float32)
     metrics: dict[str, float] = {}
     metrics.update(_raw_disagreement_summary(raw, "raw_disagreement"))
     for threshold in (0.1, 0.2, 0.3):
         metrics[f"raw_disagreement_gt_{threshold:.1f}_rate"] = float((raw > threshold).mean()) if raw.size else 0.0
-
     if semantic_pred is not None and appearance_pred is not None:
         union = np.logical_or(np.asarray(semantic_pred, dtype=bool), np.asarray(appearance_pred, dtype=bool))
         metrics.update(_raw_disagreement_summary(raw[union], "raw_disagreement_union"))
         metrics["raw_disagreement_union_voxel_rate"] = float(union.mean()) if union.size else 0.0
         for threshold in (0.1, 0.2, 0.3):
             metrics[f"raw_disagreement_union_gt_{threshold:.1f}_rate"] = float((raw[union] > threshold).mean()) if union.any() else 0.0
-
     if gt is not None:
         boundary = gt_boundary_band(np.asarray(gt, dtype=bool), spacing, boundary_band_mm)
         metrics.update(_raw_disagreement_summary(raw[boundary], "raw_disagreement_gt_boundary"))
@@ -436,25 +454,10 @@ def summarize_geometry_tensors(displacement_mm: torch.Tensor, effective_gate: to
         disp_mean = 0.0
         disp_abs_mean = 0.0
         disp_abs_max = 0.0
-    return {
-        "geometry_effective_gate_mean": float(gate.mean().cpu()),
-        "geometry_effective_gate_max": float(gate.max().cpu()) if gate.numel() else 0.0,
-        "geometry_active_gate_voxel_ratio": float(active.float().mean().cpu()) if gate.numel() else 0.0,
-        "geometry_displacement_active_mean_mm": disp_mean,
-        "geometry_abs_displacement_active_mean_mm": disp_abs_mean,
-        "geometry_abs_displacement_max_mm": disp_abs_max,
-        "geometry_modified_voxel_ratio": float(modified.float().mean().cpu()) if modified.numel() else 0.0,
-        "geometry_modified_voxels": int(modified.sum().cpu()),
-    }
+    return {"geometry_effective_gate_mean": float(gate.mean().cpu()), "geometry_effective_gate_max": float(gate.max().cpu()) if gate.numel() else 0.0, "geometry_active_gate_voxel_ratio": float(active.float().mean().cpu()) if gate.numel() else 0.0, "geometry_displacement_active_mean_mm": disp_mean, "geometry_abs_displacement_active_mean_mm": disp_abs_mean, "geometry_abs_displacement_max_mm": disp_abs_max, "geometry_modified_voxel_ratio": float(modified.float().mean().cpu()) if modified.numel() else 0.0, "geometry_modified_voxels": int(modified.sum().cpu())}
 
 
-def compute_geometry_case_metrics(
-    fused_pred: np.ndarray,
-    final_pred: np.ndarray,
-    gt: np.ndarray,
-    spacing: tuple[float, float, float],
-    surface_tolerance_mm: float,
-) -> dict[str, float | int]:
+def compute_geometry_case_metrics(fused_pred: np.ndarray, final_pred: np.ndarray, gt: np.ndarray, spacing: tuple[float, float, float], surface_tolerance_mm: float) -> dict[str, float | int]:
     fused = np.asarray(fused_pred, dtype=bool)
     final = np.asarray(final_pred, dtype=bool)
     gt = np.asarray(gt, dtype=bool)
@@ -467,28 +470,7 @@ def compute_geometry_case_metrics(
     tp_lost = np.logical_and.reduce((gt, fused, ~final))
     fp_added = np.logical_and.reduce((~gt, ~fused, final))
     fp_removed = np.logical_and.reduce((~gt, fused, ~final))
-    return {
-        "fused_before_geometry_dice": fused_base["dice"],
-        "geometry_after_dice": final_base["dice"],
-        "geometry_delta_dice": float(final_base["dice"] - fused_base["dice"]),
-        "fused_before_geometry_surface_dice": fused_surface["surface_dice"],
-        "geometry_after_surface_dice": final_surface["surface_dice"],
-        "geometry_delta_surface_dice": float(final_surface["surface_dice"] - fused_surface["surface_dice"]),
-        "fused_before_geometry_hd95": fused_surface["hd95"],
-        "geometry_after_hd95": final_surface["hd95"],
-        "fused_before_geometry_assd": fused_surface["assd"],
-        "geometry_after_assd": final_surface["assd"],
-        "geometry_modified_voxel_ratio_case": float(modified.mean()) if modified.size else 0.0,
-        "geometry_tp_gained_voxels": int(tp_gained.sum()),
-        "geometry_tp_lost_voxels": int(tp_lost.sum()),
-        "geometry_fn_recovered_voxels": int(tp_gained.sum()),
-        "geometry_fn_added_voxels": int(tp_lost.sum()),
-        "geometry_fp_added_voxels": int(fp_added.sum()),
-        "geometry_fp_removed_voxels": int(fp_removed.sum()),
-        "geometry_tp_delta": int(final_base["tp_voxels"] - fused_base["tp_voxels"]),
-        "geometry_fn_delta": int(final_base["fn_voxels"] - fused_base["fn_voxels"]),
-        "geometry_fp_delta": int(final_base["fp_voxels"] - fused_base["fp_voxels"]),
-    }
+    return {"fused_before_geometry_dice": fused_base["dice"], "geometry_after_dice": final_base["dice"], "geometry_delta_dice": float(final_base["dice"] - fused_base["dice"]), "fused_before_geometry_surface_dice": fused_surface["surface_dice"], "geometry_after_surface_dice": final_surface["surface_dice"], "geometry_delta_surface_dice": float(final_surface["surface_dice"] - fused_surface["surface_dice"]), "fused_before_geometry_hd95": fused_surface["hd95"], "geometry_after_hd95": final_surface["hd95"], "fused_before_geometry_assd": fused_surface["assd"], "geometry_after_assd": final_surface["assd"], "geometry_modified_voxel_ratio_case": float(modified.mean()) if modified.size else 0.0, "geometry_tp_gained_voxels": int(tp_gained.sum()), "geometry_tp_lost_voxels": int(tp_lost.sum()), "geometry_fn_recovered_voxels": int(tp_gained.sum()), "geometry_fn_added_voxels": int(tp_lost.sum()), "geometry_fp_added_voxels": int(fp_added.sum()), "geometry_fp_removed_voxels": int(fp_removed.sum()), "geometry_tp_delta": int(final_base["tp_voxels"] - fused_base["tp_voxels"]), "geometry_fn_delta": int(final_base["fn_voxels"] - fused_base["fn_voxels"]), "geometry_fp_delta": int(final_base["fp_voxels"] - fused_base["fp_voxels"])}
 
 
 def surface_distance_metrics(pred: np.ndarray, gt: np.ndarray, spacing: tuple[float, float, float], tolerance_mm: float) -> dict[str, float]:
@@ -504,7 +486,6 @@ def surface_distance_metrics(pred: np.ndarray, gt: np.ndarray, spacing: tuple[fl
         return {"surface_dice": 0.0, "hd95": float("inf"), "assd": float("inf")}
     try:
         from scipy import ndimage
-
         dist_to_gt = ndimage.distance_transform_edt(~gt_surface, sampling=spacing)
         dist_to_pred = ndimage.distance_transform_edt(~pred_surface, sampling=spacing)
         pred_to_gt = dist_to_gt[pred_surface]
@@ -517,11 +498,7 @@ def surface_distance_metrics(pred: np.ndarray, gt: np.ndarray, spacing: tuple[fl
         return {"surface_dice": 0.0, "hd95": float("inf"), "assd": float("inf")}
     within = (pred_to_gt <= tolerance_mm).sum() + (gt_to_pred <= tolerance_mm).sum()
     denom = max(pred_to_gt.size + gt_to_pred.size, 1)
-    return {
-        "surface_dice": float(within / denom),
-        "hd95": float(np.percentile(combined, 95)),
-        "assd": float(combined.mean()),
-    }
+    return {"surface_dice": float(within / denom), "hd95": float(np.percentile(combined, 95)), "assd": float(combined.mean())}
 
 
 def _surface_voxels(mask: np.ndarray) -> np.ndarray:
@@ -546,20 +523,8 @@ def _surface_distances_numpy(src_surface: np.ndarray, dst_surface: np.ndarray, s
 def _raw_disagreement_summary(values: np.ndarray, prefix: str) -> dict[str, float]:
     values = np.asarray(values, dtype=np.float32)
     if values.size == 0:
-        return {
-            f"{prefix}_mean": 0.0,
-            f"{prefix}_p50": 0.0,
-            f"{prefix}_p75": 0.0,
-            f"{prefix}_p90": 0.0,
-            f"{prefix}_p95": 0.0,
-        }
-    return {
-        f"{prefix}_mean": float(values.mean()),
-        f"{prefix}_p50": float(np.percentile(values, 50)),
-        f"{prefix}_p75": float(np.percentile(values, 75)),
-        f"{prefix}_p90": float(np.percentile(values, 90)),
-        f"{prefix}_p95": float(np.percentile(values, 95)),
-    }
+        return {f"{prefix}_mean": 0.0, f"{prefix}_p50": 0.0, f"{prefix}_p75": 0.0, f"{prefix}_p90": 0.0, f"{prefix}_p95": 0.0}
+    return {f"{prefix}_mean": float(values.mean()), f"{prefix}_p50": float(np.percentile(values, 50)), f"{prefix}_p75": float(np.percentile(values, 75)), f"{prefix}_p90": float(np.percentile(values, 90)), f"{prefix}_p95": float(np.percentile(values, 95))}
 
 
 def gt_boundary_band(mask: np.ndarray, spacing: tuple[float, float, float], band_mm: float = 2.0) -> np.ndarray:
@@ -568,7 +533,6 @@ def gt_boundary_band(mask: np.ndarray, spacing: tuple[float, float, float], band
         return np.zeros_like(mask, dtype=bool)
     try:
         from scipy import ndimage
-
         outside = ndimage.distance_transform_edt(~mask, sampling=spacing)
         inside = ndimage.distance_transform_edt(mask, sampling=spacing)
         return np.minimum(outside, inside) <= float(band_mm)
@@ -606,12 +570,4 @@ def _binary_metric_values(pred: np.ndarray, gt: np.ndarray) -> dict[str, float |
     tp = int(np.logical_and(pred, gt).sum())
     fp = int(np.logical_and(pred, ~gt).sum())
     fn = int(np.logical_and(~pred, gt).sum())
-    return {
-        "dice": dice,
-        "iou": iou,
-        "tp_voxels": tp,
-        "precision": float(tp / max(tp + fp, 1)),
-        "recall": float(tp / max(tp + fn, 1)),
-        "fp_voxels": fp,
-        "fn_voxels": fn,
-    }
+    return {"dice": dice, "iou": iou, "tp_voxels": tp, "precision": float(tp / max(tp + fp, 1)), "recall": float(tp / max(tp + fn, 1)), "fp_voxels": fp, "fn_voxels": fn}
