@@ -4,7 +4,7 @@ import numpy as np
 import torch
 
 from dhga.config import DHGAConfig
-from dhga.evaluation import compute_directional_candidate_metrics, gt_boundary_band
+from dhga.evaluation import compute_directional_candidate_metrics
 from dhga.text_layer_ensemble import build_directional_candidate_scores, fuse_text_layer_ensemble, text_layer_training_loss
 
 
@@ -48,21 +48,39 @@ def test_directional_consistent_layers_have_no_candidate():
     assert torch.count_nonzero(out["candidate_shrink_score"]) == 0
 
 
-def test_directional_diagnostics_do_not_change_existing_fusion_or_loss():
+def test_primary_fusion_and_training_use_last_layer():
     config = make_config()
-    semantic = make_summary(0.65, 0.55, 0.45)
-    appearance = make_summary(0.60, 0.50, 0.40)
+    semantic = make_summary(0.65, 0.15, 0.10)
+    appearance = make_summary(0.60, 0.20, 0.15)
     out = fuse_text_layer_ensemble(semantic, appearance, config)
     w_sem = torch.exp(-semantic["u_layer"] / config.dhga_text_layer_temperature)
     w_app = torch.exp(-appearance["u_layer"] / config.dhga_text_layer_temperature)
-    expected_p_base = (w_sem * semantic["p_mean"] + w_app * appearance["p_mean"]) / (w_sem + w_app).clamp_min(1e-6)
+    expected_p_base = (w_sem * semantic["p_last"] + w_app * appearance["p_last"]) / (w_sem + w_app).clamp_min(1e-6)
+    mean_based_p_base = (w_sem * semantic["p_mean"] + w_app * appearance["p_mean"]) / (w_sem + w_app).clamp_min(1e-6)
     assert torch.allclose(out["p_base"], expected_p_base)
     assert torch.allclose(out["p_final"], expected_p_base)
-    base_ensemble = {"semantic_p_mean": semantic["p_mean"], "appearance_p_mean": appearance["p_mean"], "reliable_fg": out["reliable_fg"], "reliable_bg": out["reliable_bg"], "candidate_fg": out["candidate_fg"], "ignored": out["ignored"]}
-    extended_ensemble = {**base_ensemble, **{key: value for key, value in out.items() if key.startswith("directional_") or key.startswith("candidate_expand") or key.startswith("candidate_shrink")}}
-    loss_a, _ = text_layer_training_loss(SimpleNamespace(layer_ensemble=base_ensemble), config)
-    loss_b, _ = text_layer_training_loss(SimpleNamespace(layer_ensemble=extended_ensemble), config)
-    assert torch.allclose(loss_a, loss_b)
+    assert not torch.allclose(out["p_base"], mean_based_p_base)
+    ensemble = {"semantic_p_last": semantic["p_last"], "appearance_p_last": appearance["p_last"], "semantic_p_mean": semantic["p_mean"], "appearance_p_mean": appearance["p_mean"], "reliable_fg": torch.zeros_like(out["reliable_fg"]), "reliable_bg": torch.ones_like(out["reliable_bg"]), "candidate_fg": out["candidate_fg"], "ignored": out["ignored"]}
+    loss, metrics = text_layer_training_loss(SimpleNamespace(layer_ensemble=ensemble), config)
+    expected_sem_loss = -torch.log1p(-semantic["p_last"]).mean()
+    expected_app_loss = -torch.log1p(-appearance["p_last"]).mean()
+    assert torch.allclose(loss, expected_sem_loss + expected_app_loss)
+    assert abs(metrics["dhga_text_layer_semantic_loss"] - float(expected_sem_loss)) < 1e-6
+    assert abs(metrics["dhga_text_layer_appearance_loss"] - float(expected_app_loss)) < 1e-6
+
+
+def test_lower_layers_still_affect_uncertainty_and_candidate_logic():
+    config = make_config()
+    stable_semantic = make_summary(0.40, 0.40, 0.40)
+    stable_appearance = make_summary(0.42, 0.42, 0.42)
+    disputed_semantic = make_summary(0.40, 0.85, 0.80)
+    disputed_appearance = make_summary(0.42, 0.82, 0.78)
+    stable_out = fuse_text_layer_ensemble(stable_semantic, stable_appearance, config)
+    disputed_out = fuse_text_layer_ensemble(disputed_semantic, disputed_appearance, config)
+    assert torch.allclose(stable_out["p_base"], disputed_out["p_base"], atol=1e-6)
+    assert torch.count_nonzero(stable_out["candidate_fg"]) == 0
+    assert torch.count_nonzero(disputed_out["candidate_fg"]) > 0
+    assert disputed_semantic["u_layer"].mean() > stable_semantic["u_layer"].mean()
 
 
 def test_directional_candidate_metrics_reward_error_hits():
@@ -80,14 +98,3 @@ def test_directional_candidate_metrics_reward_error_hits():
     assert metrics["directional_shrink_top05_hit_rate"] > 0
     assert metrics["directional_expand_top05_boundary_fn_coverage"] > 0
     assert metrics["directional_shrink_top05_boundary_fp_coverage"] > 0
-
-
-def test_boundary_band_is_local_not_whole_volume():
-    mask = np.zeros((15, 15, 15), dtype=bool)
-    mask[5:10, 5:10, 5:10] = True
-    band = gt_boundary_band(mask, (1.0, 1.0, 1.0), 1.0)
-    assert band.any()
-    assert not band.all()
-    assert not band[0, 0, 0]
-    assert band[5, 7, 7]
-    assert not band[7, 7, 7]

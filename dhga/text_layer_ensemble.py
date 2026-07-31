@@ -141,8 +141,8 @@ def fuse_text_layer_ensemble(semantic: dict[str, Tensor], appearance: dict[str, 
     u_app = appearance["u_layer"]
     w_sem = torch.exp(-u_sem / temperature)
     w_app = torch.exp(-u_app / temperature)
-    p_sem = semantic["p_mean"]
-    p_app = appearance["p_mean"]
+    p_sem = semantic["p_last"]
+    p_app = appearance["p_last"]
     p_base = (w_sem * p_sem + w_app * p_app) / (w_sem + w_app).clamp_min(1e-6)
     p_max_all = torch.maximum(semantic["p_max"], appearance["p_max"])
     layer_disagreement = torch.maximum(u_sem, u_app)
@@ -217,8 +217,8 @@ def text_layer_training_loss(out, config: DHGAConfig, teacher_ensemble: dict[str
     fg = target_ens["reliable_fg"].detach() > 0.5
     bg = target_ens["reliable_bg"].detach() > 0.5
     candidate = target_ens["candidate_fg"].detach() > 0.5
-    semantic_prob = ens["semantic_p_mean"]
-    appearance_prob = ens["appearance_p_mean"]
+    semantic_prob = ens["semantic_p_last"]
+    appearance_prob = ens["appearance_p_last"]
     sem_loss = balanced_masked_bce(semantic_prob, fg, bg)
     app_loss = balanced_masked_bce(appearance_prob, fg, bg)
     zero = semantic_prob.sum() * 0.0 + appearance_prob.sum() * 0.0
