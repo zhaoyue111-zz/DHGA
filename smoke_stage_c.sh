@@ -16,7 +16,7 @@ CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}" conda run -n voxtell python ru
   --dhga_boundary_chunk_size 128 \
   --dhga_corruption_max_offset_mm 3.0 \
   --dhga_corruption_modes inward outward \
-  --save_dir .save/dhga/stage_c_v42_smoke \
+  --save_dir .save/dhga/stage_c_v42_smoke_10ep \
   --voxtell_repo /mnt/afs2/zy/VoxTell_from_disk \
   --model_dir /mnt/afs2/zy/VoxTell_from_disk/model \
   --data_dir /mnt/afs2/zy/CT_MRI_DATA_3D/images/P0 \
@@ -25,6 +25,6 @@ CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}" conda run -n voxtell python ru
   --prompts liver \
   --prompt_templates "{}" \
   --device cuda \
-  --epochs 2 \
+  --epochs 10 \
   --steps_per_volume 2 \
   --max_cases 2

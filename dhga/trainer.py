@@ -35,6 +35,34 @@ class DHGASmokeResult:
     shared_encoder_calls: int
 
 
+def signed_displacement_metrics(displacement_mm: Tensor, valid: Tensor, near_zero_threshold_mm: float, prefix: str) -> dict[str, float]:
+    valid_mask = valid.detach().bool()
+    values = displacement_mm.detach().float()
+    if values.shape != valid_mask.shape:
+        raise ValueError(f"{prefix} displacement shape {tuple(values.shape)} does not match valid mask {tuple(valid_mask.shape)}")
+    valid_count = int(valid_mask.sum().cpu())
+    if valid_count <= 0:
+        return {
+            f"{prefix}_abs_displacement_mm": 0.0,
+            f"{prefix}_positive_displacement_ratio": 0.0,
+            f"{prefix}_negative_displacement_ratio": 0.0,
+            f"{prefix}_near_zero_displacement_ratio": 0.0,
+            f"{prefix}_nonzero_displacement_ratio": 0.0,
+        }
+    valid_values = values[valid_mask]
+    threshold = max(1e-4, float(near_zero_threshold_mm))
+    near_zero = valid_values.abs() <= threshold
+    positive = valid_values > threshold
+    negative = valid_values < -threshold
+    return {
+        f"{prefix}_abs_displacement_mm": float(valid_values.abs().mean().cpu()),
+        f"{prefix}_positive_displacement_ratio": float(positive.float().mean().cpu()),
+        f"{prefix}_negative_displacement_ratio": float(negative.float().mean().cpu()),
+        f"{prefix}_near_zero_displacement_ratio": float(near_zero.float().mean().cpu()),
+        f"{prefix}_nonzero_displacement_ratio": float((~near_zero).float().mean().cpu()),
+    }
+
+
 class TinySegDecoder(nn.Module):
     def __init__(self, in_channels: int) -> None:
         super().__init__()
@@ -959,28 +987,13 @@ class DHGAStageTrainer:
         displacement = geometry["sparse_displacement_mm"]
         recovery = boundary_recovery_loss(displacement, target, valid.float())
         minimal = minimal_transport_loss(displacement, valid.float())
-        disp_detached = displacement.detach().float()
         valid_detached = valid.detach().bool()
         valid_count = int(valid_detached.sum().cpu())
         total_points = int(valid_detached.numel())
         near_zero_threshold = max(1e-4, 0.25 * float(self.config.dhga_ray_step_mm))
-        if valid_count > 0:
-            valid_disp = disp_detached[valid_detached]
-            abs_disp = float(valid_disp.abs().mean().cpu())
-            near_zero = valid_disp.abs() <= near_zero_threshold
-            positive = valid_disp > near_zero_threshold
-            negative = valid_disp < -near_zero_threshold
-            near_zero_ratio = float(near_zero.float().mean().cpu())
-            positive_ratio = float(positive.float().mean().cpu())
-            negative_ratio = float(negative.float().mean().cpu())
-            nonzero_ratio = float((~near_zero).float().mean().cpu())
-        else:
-            abs_disp = 0.0
-            near_zero_ratio = 0.0
-            positive_ratio = 0.0
-            negative_ratio = 0.0
-            nonzero_ratio = 0.0
-        return recovery, minimal, {
+        displacement_metrics = signed_displacement_metrics(displacement, valid, near_zero_threshold, "dhga_pred")
+        target_metrics = signed_displacement_metrics(target, valid, near_zero_threshold, "dhga_target")
+        metrics = {
             "dhga_boundary_recovery_loss": float(recovery.detach().cpu()),
             "dhga_minimal_transport_loss": float(minimal.detach().cpu()),
             "dhga_inward_corruptions": float(choices[..., 0].mean().detach().cpu()),
@@ -989,14 +1002,12 @@ class DHGAStageTrainer:
             "dhga_valid_boundary_points": float(valid.float().mean().detach().cpu()),
             "dhga_valid_boundary_point_count": float(valid_count),
             "dhga_total_boundary_point_slots": float(total_points),
-            "dhga_pred_abs_displacement_mm": abs_disp,
-            "dhga_pred_positive_displacement_ratio": positive_ratio,
-            "dhga_pred_negative_displacement_ratio": negative_ratio,
-            "dhga_pred_near_zero_displacement_ratio": near_zero_ratio,
-            "dhga_pred_nonzero_displacement_ratio": nonzero_ratio,
             "dhga_reused_teacher_forward": float(reused_teacher),
             "dhga_reused_student_forward": float(reused_student),
         }
+        metrics.update(displacement_metrics)
+        metrics.update(target_metrics)
+        return recovery, minimal, metrics
 
     def _combine_stage_c_loss(self, recovery: Tensor, minimal: Tensor) -> Tensor:
         return self.config.dhga_boundary_recovery_weight * recovery + self.config.dhga_minimal_transport_weight * minimal

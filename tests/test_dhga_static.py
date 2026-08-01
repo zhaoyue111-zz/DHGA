@@ -21,7 +21,7 @@ from dhga.inference import finalize_mask, finalize_probability, geometry_effecti
 from dhga.losses import cross_supervision_loss, weighted_bce_prob
 from dhga.routing import DisagreementRouter
 from dhga.shared_voxtell import SharedEncoderOnce
-from dhga.trainer import DHGASmokeModel, run_synthetic_smoke
+from dhga.trainer import DHGASmokeModel, run_synthetic_smoke, signed_displacement_metrics
 from dhga.trainer import DHGAStageTrainer
 from dhga.teacher import EMATeacher
 from dhga.text_layer_ensemble import fuse_text_layer_ensemble, summarize_layers, text_layer_training_loss
@@ -174,6 +174,42 @@ class DHGAStaticTests(unittest.TestCase):
         nonzero_prob = float(out["prob"][0, 0][offsets != 0].sum().detach())
         self.assertGreater(nonzero_prob, 0.1)
         self.assertLess(center_prob, 0.9)
+
+    def test_signed_displacement_metrics_use_only_valid_points(self):
+        displacement = torch.tensor([[0.50, -0.40, 0.10, 100.0, float("nan")]])
+        valid = torch.tensor([[True, True, True, False, False]])
+        metrics = signed_displacement_metrics(displacement, valid, 0.25, "dhga_target")
+        self.assertAlmostEqual(metrics["dhga_target_abs_displacement_mm"], (0.50 + 0.40 + 0.10) / 3.0, places=6)
+        self.assertAlmostEqual(metrics["dhga_target_positive_displacement_ratio"], 1.0 / 3.0, places=6)
+        self.assertAlmostEqual(metrics["dhga_target_negative_displacement_ratio"], 1.0 / 3.0, places=6)
+        self.assertAlmostEqual(metrics["dhga_target_near_zero_displacement_ratio"], 1.0 / 3.0, places=6)
+        self.assertAlmostEqual(metrics["dhga_target_nonzero_displacement_ratio"], 2.0 / 3.0, places=6)
+        self.assertTrue(all(torch.isfinite(torch.tensor(value)) for value in metrics.values()))
+
+    def test_signed_displacement_metrics_zero_when_no_valid_points(self):
+        displacement = torch.tensor([[float("nan"), 3.0, -3.0]])
+        valid = torch.zeros_like(displacement, dtype=torch.bool)
+        metrics = signed_displacement_metrics(displacement, valid, 0.25, "dhga_target")
+        self.assertTrue(all(value == 0.0 for value in metrics.values()))
+        self.assertTrue(all(torch.isfinite(torch.tensor(value)) for value in metrics.values()))
+
+    def test_signed_displacement_metrics_use_same_rules_for_prediction_and_target(self):
+        values = torch.tensor([[-0.26, -0.25, 0.0, 0.25, 0.26]])
+        valid = torch.ones_like(values, dtype=torch.bool)
+        target = signed_displacement_metrics(values, valid, 0.25, "dhga_target")
+        pred = signed_displacement_metrics(values, valid, 0.25, "dhga_pred")
+        for suffix in (
+            "abs_displacement_mm",
+            "positive_displacement_ratio",
+            "negative_displacement_ratio",
+            "near_zero_displacement_ratio",
+            "nonzero_displacement_ratio",
+        ):
+            self.assertAlmostEqual(target[f"dhga_target_{suffix}"], pred[f"dhga_pred_{suffix}"], places=6)
+        self.assertAlmostEqual(target["dhga_target_positive_displacement_ratio"], 1.0 / 5.0, places=6)
+        self.assertAlmostEqual(target["dhga_target_negative_displacement_ratio"], 1.0 / 5.0, places=6)
+        self.assertAlmostEqual(target["dhga_target_near_zero_displacement_ratio"], 3.0 / 5.0, places=6)
+        self.assertAlmostEqual(target["dhga_target_nonzero_displacement_ratio"], 2.0 / 5.0, places=6)
 
     def test_bidirectional_corruption_recovery_sign(self):
         sdf = torch.zeros(8, 1, 7, 7, 7)
