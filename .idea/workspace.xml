@@ -5,12 +5,10 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="6fb578aa-0101-4d98-adb8-1c85a67dd3aa" name="Changes" comment="stage C">
-      <change beforePath="$PROJECT_DIR$/.idea/misc.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/misc.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/dhga/evaluation.py.before_oom_fix" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/dhga/trainer.py.before_oom_fix" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/dhga/trainer.py" beforeDir="false" afterPath="$PROJECT_DIR$/dhga/trainer.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/smoke_stage_c.sh" beforeDir="false" afterPath="$PROJECT_DIR$/smoke_stage_c.sh" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/train_stage_c.sh" beforeDir="false" afterPath="$PROJECT_DIR$/train_stage_c.sh" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/test_dhga_static.py" beforeDir="false" afterPath="$PROJECT_DIR$/tests/test_dhga_static.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -102,7 +100,7 @@
       <updated>1785146243950</updated>
       <workItem from="1785146244991" duration="50389000" />
       <workItem from="1785568881614" duration="319000" />
-      <workItem from="1785569468951" duration="6681000" />
+      <workItem from="1785569468951" duration="8651000" />
     </task>
     <task id="LOCAL-00001" summary="add voxtell_sfda module">
       <option name="closed" value="true" />
@@ -152,7 +150,23 @@
       <option name="project" value="LOCAL" />
       <updated>1785592448965</updated>
     </task>
-    <option name="localTasksCounter" value="7" />
+    <task id="LOCAL-00007" summary="stage C">
+      <option name="closed" value="true" />
+      <created>1785593547914</created>
+      <option name="number" value="00007" />
+      <option name="presentableId" value="LOCAL-00007" />
+      <option name="project" value="LOCAL" />
+      <updated>1785593547914</updated>
+    </task>
+    <task id="LOCAL-00008" summary="stage C">
+      <option name="closed" value="true" />
+      <created>1785593777336</created>
+      <option name="number" value="00008" />
+      <option name="presentableId" value="LOCAL-00008" />
+      <option name="project" value="LOCAL" />
+      <updated>1785593777336</updated>
+    </task>
+    <option name="localTasksCounter" value="9" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
