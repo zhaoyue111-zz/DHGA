@@ -18,7 +18,7 @@ from .experts import AppearanceExpert, SemanticExpert
 from .geometry import GeometryTransportHead, extract_boundary_points, make_ray_offsets_mm, mask_to_sdf
 from .geometry.boundary_corruption import make_local_boundary_corruption
 from .geometry.ray_sampler import sample_along_normals
-from .losses import boundary_recovery_loss, cross_supervision_loss, diagnostics_from_probs, minimal_transport_loss, weighted_bce_prob
+from .losses import balanced_boundary_recovery_loss, cross_supervision_loss, diagnostics_from_probs, minimal_transport_loss, weighted_bce_prob
 from .routing import DisagreementRouter
 from .shared_voxtell import SharedEncoderOnce, trainable_parameter_summary
 from .teacher import EMATeacher
@@ -985,16 +985,27 @@ class DHGAStageTrainer:
         target = sampled_target[:, :, 0, 0]
         valid = valid_target[:, :, 0] & geometry["valid_boundary_points"]
         displacement = geometry["sparse_displacement_mm"]
-        recovery = boundary_recovery_loss(displacement, target, valid.float())
-        minimal = minimal_transport_loss(displacement, valid.float())
         valid_detached = valid.detach().bool()
         valid_count = int(valid_detached.sum().cpu())
         total_points = int(valid_detached.numel())
         near_zero_threshold = max(1e-4, 0.25 * float(self.config.dhga_ray_step_mm))
+        recovery, recovery_parts = balanced_boundary_recovery_loss(
+            displacement,
+            target,
+            valid,
+            near_zero_threshold,
+            self.config.dhga_boundary_recovery_zero_weight,
+        )
+        minimal = minimal_transport_loss(displacement, valid.float())
         displacement_metrics = signed_displacement_metrics(displacement, valid, near_zero_threshold, "dhga_pred")
         target_metrics = signed_displacement_metrics(target, valid, near_zero_threshold, "dhga_target")
         metrics = {
             "dhga_boundary_recovery_loss": float(recovery.detach().cpu()),
+            "dhga_boundary_recovery_nonzero_loss": float(recovery_parts["nonzero_loss"].cpu()),
+            "dhga_boundary_recovery_zero_loss": float(recovery_parts["zero_loss"].cpu()),
+            "dhga_boundary_recovery_nonzero_count": float(recovery_parts["nonzero_count"].cpu()),
+            "dhga_boundary_recovery_zero_count": float(recovery_parts["zero_count"].cpu()),
+            "dhga_pred_target_sign_agreement": float(recovery_parts["sign_agreement"].cpu()),
             "dhga_minimal_transport_loss": float(minimal.detach().cpu()),
             "dhga_inward_corruptions": float(choices[..., 0].mean().detach().cpu()),
             "dhga_outward_corruptions": float(choices[..., 1].mean().detach().cpu()),

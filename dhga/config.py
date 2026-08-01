@@ -77,6 +77,7 @@ class DHGAConfig:
     dhga_corruption_max_offset_mm: float = 3.0
     dhga_corruption_modes: list[str] = field(default_factory=lambda: ["inward", "outward"])
     dhga_boundary_recovery_weight: float = 1.0
+    dhga_boundary_recovery_zero_weight: float = 0.25
     dhga_transport_equivariance_weight: float = 0.1
     dhga_prompt_ranking_weight: float = 0.0
     dhga_minimal_transport_weight: float = 0.01
@@ -167,6 +168,8 @@ class DHGAConfig:
             raise ValueError("boundary chunk and max points must be positive")
         if self.dhga_corruption_max_offset_mm <= 0:
             raise ValueError("corruption max offset must be positive")
+        if self.dhga_boundary_recovery_zero_weight < 0:
+            raise ValueError("dhga_boundary_recovery_zero_weight must be non-negative")
         if not 0.0 < self.pred_threshold < 1.0:
             raise ValueError("pred_threshold must be in (0, 1)")
 

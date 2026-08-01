@@ -9,7 +9,7 @@ import unittest
 
 import torch
 
-from dhga.checkpoint import load_dhga_checkpoint, load_training_checkpoint, save_dhga_checkpoint, save_training_checkpoint
+from dhga.checkpoint import STAGE_C_FRESH_GEOMETRY_PREFIXES, load_dhga_checkpoint, load_training_checkpoint, save_dhga_checkpoint, save_training_checkpoint
 from dhga.config import DHGAConfig
 from dhga.experts import AppearanceExpert, AppearanceFeatureAdapter, SemanticExpert
 from dhga.geometry.boundary_corruption import make_bidirectional_corruption, make_local_boundary_corruption
@@ -18,10 +18,10 @@ from dhga.geometry.transport_head import GeometryTransportHead
 from dhga.geometry.boundary_points import extract_boundary_points, sparse_displacements_to_dense_narrowband
 from dhga.geometry.sdf import mask_to_sdf, sdf_normals, update_sdf_with_displacement
 from dhga.inference import finalize_mask, finalize_probability, geometry_effective_gate
-from dhga.losses import cross_supervision_loss, weighted_bce_prob
+from dhga.losses import balanced_boundary_recovery_loss, cross_supervision_loss, weighted_bce_prob
 from dhga.routing import DisagreementRouter
 from dhga.shared_voxtell import SharedEncoderOnce
-from dhga.trainer import DHGASmokeModel, run_synthetic_smoke
+from dhga.trainer import DHGASmokeModel, run_synthetic_smoke, signed_displacement_metrics
 from dhga.trainer import DHGAStageTrainer
 from dhga.teacher import EMATeacher
 from dhga.text_layer_ensemble import fuse_text_layer_ensemble, summarize_layers, text_layer_training_loss
@@ -163,6 +163,107 @@ class DHGAStaticTests(unittest.TestCase):
         offsets = make_ray_offsets_mm(5.5, 2.0)
         self.assertTrue(bool((offsets.abs() <= 5.5 + 1e-6).all()))
         self.assertTrue(bool((offsets == 0).any()))
+
+    def test_geometry_transport_head_zero_prior_is_mild(self):
+        offsets = torch.arange(-3.0, 4.0)
+        head = GeometryTransportHead(1, offsets)
+        self.assertAlmostEqual(float(head.center_bias.detach()), 2.0, places=5)
+        self.assertTrue(torch.allclose(head.zero_displacement_prior, -offsets.abs()))
+        out = head(torch.zeros(1, 1, offsets.numel(), 1))
+        center_prob = float(out["prob"][0, 0, head.center_index].detach())
+        nonzero_prob = float(out["prob"][0, 0][offsets != 0].sum().detach())
+        self.assertGreater(nonzero_prob, 0.1)
+        self.assertLess(center_prob, 0.9)
+
+    def test_signed_displacement_metrics_use_only_valid_points(self):
+        displacement = torch.tensor([[0.50, -0.40, 0.10, 100.0, float("nan")]])
+        valid = torch.tensor([[True, True, True, False, False]])
+        metrics = signed_displacement_metrics(displacement, valid, 0.25, "dhga_target")
+        self.assertAlmostEqual(metrics["dhga_target_abs_displacement_mm"], (0.50 + 0.40 + 0.10) / 3.0, places=6)
+        self.assertAlmostEqual(metrics["dhga_target_positive_displacement_ratio"], 1.0 / 3.0, places=6)
+        self.assertAlmostEqual(metrics["dhga_target_negative_displacement_ratio"], 1.0 / 3.0, places=6)
+        self.assertAlmostEqual(metrics["dhga_target_near_zero_displacement_ratio"], 1.0 / 3.0, places=6)
+        self.assertAlmostEqual(metrics["dhga_target_nonzero_displacement_ratio"], 2.0 / 3.0, places=6)
+        self.assertTrue(all(torch.isfinite(torch.tensor(value)) for value in metrics.values()))
+
+    def test_signed_displacement_metrics_zero_when_no_valid_points(self):
+        displacement = torch.tensor([[float("nan"), 3.0, -3.0]])
+        valid = torch.zeros_like(displacement, dtype=torch.bool)
+        metrics = signed_displacement_metrics(displacement, valid, 0.25, "dhga_target")
+        self.assertTrue(all(value == 0.0 for value in metrics.values()))
+        self.assertTrue(all(torch.isfinite(torch.tensor(value)) for value in metrics.values()))
+
+    def test_signed_displacement_metrics_use_same_rules_for_prediction_and_target(self):
+        values = torch.tensor([[-0.26, -0.25, 0.0, 0.25, 0.26]])
+        valid = torch.ones_like(values, dtype=torch.bool)
+        target = signed_displacement_metrics(values, valid, 0.25, "dhga_target")
+        pred = signed_displacement_metrics(values, valid, 0.25, "dhga_pred")
+        for suffix in (
+            "abs_displacement_mm",
+            "positive_displacement_ratio",
+            "negative_displacement_ratio",
+            "near_zero_displacement_ratio",
+            "nonzero_displacement_ratio",
+        ):
+            self.assertAlmostEqual(target[f"dhga_target_{suffix}"], pred[f"dhga_pred_{suffix}"], places=6)
+        self.assertAlmostEqual(target["dhga_target_positive_displacement_ratio"], 1.0 / 5.0, places=6)
+        self.assertAlmostEqual(target["dhga_target_negative_displacement_ratio"], 1.0 / 5.0, places=6)
+        self.assertAlmostEqual(target["dhga_target_near_zero_displacement_ratio"], 3.0 / 5.0, places=6)
+        self.assertAlmostEqual(target["dhga_target_nonzero_displacement_ratio"], 2.0 / 5.0, places=6)
+
+    def test_balanced_boundary_recovery_groups_mean_and_excludes_invalid(self):
+        pred = torch.zeros(1, 6, requires_grad=True)
+        target = torch.tensor([[1.0, -1.0, 0.25, -0.25, 0.0, 100.0]])
+        valid = torch.tensor([[True, True, True, True, True, False]])
+        loss, parts = balanced_boundary_recovery_loss(pred, target, valid, 0.25, zero_weight=0.25)
+        expected_move = 1.0
+        expected_stay = (0.25 + 0.25 + 0.0) / 3.0
+        self.assertAlmostEqual(float(parts["nonzero_loss"]), expected_move, places=6)
+        self.assertAlmostEqual(float(parts["zero_loss"]), expected_stay, places=6)
+        self.assertAlmostEqual(float(loss.detach()), expected_move + 0.25 * expected_stay, places=6)
+        self.assertEqual(float(parts["nonzero_count"]), 2.0)
+        self.assertEqual(float(parts["zero_count"]), 3.0)
+
+    def test_balanced_boundary_recovery_backprops_with_only_zero_points(self):
+        pred = torch.tensor([[0.2, -0.2]], requires_grad=True)
+        target = torch.tensor([[0.25, -0.25]])
+        valid = torch.ones_like(target, dtype=torch.bool)
+        loss, parts = balanced_boundary_recovery_loss(pred, target, valid, 0.25, zero_weight=0.25)
+        self.assertEqual(float(parts["nonzero_count"]), 0.0)
+        self.assertEqual(float(parts["zero_count"]), 2.0)
+        loss.backward()
+        self.assertIsNotNone(pred.grad)
+        self.assertTrue(torch.isfinite(pred.grad).all())
+
+    def test_balanced_boundary_recovery_backprops_with_only_nonzero_points(self):
+        pred = torch.tensor([[0.2, -0.2]], requires_grad=True)
+        target = torch.tensor([[1.0, -1.0]])
+        valid = torch.ones_like(target, dtype=torch.bool)
+        loss, parts = balanced_boundary_recovery_loss(pred, target, valid, 0.25, zero_weight=0.25)
+        self.assertEqual(float(parts["nonzero_count"]), 2.0)
+        self.assertEqual(float(parts["zero_count"]), 0.0)
+        loss.backward()
+        self.assertIsNotNone(pred.grad)
+        self.assertTrue(torch.isfinite(pred.grad).all())
+
+    def test_balanced_boundary_recovery_zero_when_no_valid_points(self):
+        pred = torch.tensor([[float("nan"), 1.0]], requires_grad=True)
+        target = torch.tensor([[1.0, -1.0]])
+        valid = torch.zeros_like(target, dtype=torch.bool)
+        loss, parts = balanced_boundary_recovery_loss(pred, target, valid, 0.25, zero_weight=0.25)
+        self.assertTrue(torch.isfinite(loss.detach()))
+        self.assertEqual(float(loss.detach()), 0.0)
+        self.assertEqual(float(parts["nonzero_count"]), 0.0)
+        self.assertEqual(float(parts["zero_count"]), 0.0)
+        loss.backward()
+        self.assertIsNotNone(pred.grad)
+
+    def test_balanced_boundary_recovery_sign_agreement_requires_nonzero_prediction(self):
+        pred = torch.tensor([[0.5, -0.5, -0.5, -0.1]])
+        target = torch.tensor([[0.5, -0.5, 0.5, -0.5]])
+        valid = torch.ones_like(target, dtype=torch.bool)
+        _loss, parts = balanced_boundary_recovery_loss(pred, target, valid, 0.25, zero_weight=0.25)
+        self.assertAlmostEqual(float(parts["sign_agreement"]), 2.0 / 4.0, places=6)
 
     def test_bidirectional_corruption_recovery_sign(self):
         sdf = torch.zeros(8, 1, 7, 7, 7)
@@ -382,6 +483,83 @@ class DHGAStaticTests(unittest.TestCase):
         self.assertEqual(int(payload["epoch"]), 3)
         self.assertEqual(int(payload["global_step"]), 17)
 
+    def test_stage_b_to_c_init_keeps_fresh_geometry_but_resume_restores_it(self):
+        class TinyStageModel(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.semantic_expert = torch.nn.Linear(1, 1)
+                self.appearance_expert = torch.nn.Linear(1, 1)
+                self.router = torch.nn.Linear(1, 1)
+                self.geometry_head = torch.nn.Linear(1, 1)
+                self.ray_tokens = torch.nn.Linear(1, 1)
+                self.geometry_visual_proj = torch.nn.Conv3d(1, 1, 1)
+
+        def fill_module(module: torch.nn.Module, value: float) -> None:
+            with torch.no_grad():
+                for param in module.parameters():
+                    param.fill_(value)
+
+        tmp = Path(".save") / "unit_checkpoint_tests"
+        tmp.mkdir(parents=True, exist_ok=True)
+        stage_b_path = tmp / "stage_b_to_c_init.pt"
+        stage_c_path = tmp / "stage_c_resume.pt"
+        try:
+            source_b = TinyStageModel()
+            fill_module(source_b.semantic_expert, 2.0)
+            fill_module(source_b.appearance_expert, 3.0)
+            fill_module(source_b.router, 4.0)
+            fill_module(source_b.geometry_head, 90.0)
+            fill_module(source_b.ray_tokens, 91.0)
+            fill_module(source_b.geometry_visual_proj, 92.0)
+            save_training_checkpoint(stage_b_path, source_b, DHGAConfig(dhga_stage="B"), metadata={"stage": "B"})
+
+            stage_c_init = TinyStageModel()
+            geometry_before = {
+                name: tensor.detach().clone()
+                for name, tensor in stage_c_init.state_dict().items()
+                if name.startswith(STAGE_C_FRESH_GEOMETRY_PREFIXES)
+            }
+            init_payload = load_training_checkpoint(
+                stage_b_path,
+                stage_c_init,
+                load_training_state=False,
+                skip_model_prefixes=STAGE_C_FRESH_GEOMETRY_PREFIXES,
+            )
+            self.assertIn("geometry_head.weight", init_payload["skipped_model_keys"])
+            self.assertTrue(torch.allclose(stage_c_init.semantic_expert.weight, torch.full_like(stage_c_init.semantic_expert.weight, 2.0)))
+            self.assertTrue(torch.allclose(stage_c_init.appearance_expert.weight, torch.full_like(stage_c_init.appearance_expert.weight, 3.0)))
+            self.assertTrue(torch.allclose(stage_c_init.router.weight, torch.full_like(stage_c_init.router.weight, 4.0)))
+            for name, tensor in stage_c_init.state_dict().items():
+                if name.startswith(STAGE_C_FRESH_GEOMETRY_PREFIXES):
+                    self.assertTrue(torch.allclose(tensor, geometry_before[name]), msg=f"{name} should keep source-code initialization")
+
+            source_c = TinyStageModel()
+            fill_module(source_c.geometry_head, 7.0)
+            fill_module(source_c.ray_tokens, 8.0)
+            fill_module(source_c.geometry_visual_proj, 9.0)
+            optim_c = torch.optim.AdamW(source_c.parameters(), lr=1e-3)
+            loss = sum(param.sum() for param in source_c.parameters())
+            loss.backward()
+            optim_c.step()
+            saved_geometry = {
+                name: tensor.detach().clone()
+                for name, tensor in source_c.state_dict().items()
+                if name.startswith(STAGE_C_FRESH_GEOMETRY_PREFIXES)
+            }
+            save_training_checkpoint(stage_c_path, source_c, DHGAConfig(dhga_stage="C"), optimizer=optim_c, metadata={"stage": "C"})
+
+            resumed_c = TinyStageModel()
+            resumed_optim = torch.optim.AdamW(resumed_c.parameters(), lr=5e-4)
+            resume_payload = load_training_checkpoint(stage_c_path, resumed_c, resumed_optim, expected_stage="C")
+            self.assertEqual(resume_payload["skipped_model_keys"], [])
+            for name, tensor in resumed_c.state_dict().items():
+                if name.startswith(STAGE_C_FRESH_GEOMETRY_PREFIXES):
+                    self.assertTrue(torch.allclose(tensor, saved_geometry[name]), msg=f"{name} should restore on Stage C resume")
+            self.assertGreater(len(resumed_optim.state_dict()["state"]), 0)
+        finally:
+            stage_b_path.unlink(missing_ok=True)
+            stage_c_path.unlink(missing_ok=True)
+
     def test_ema_teacher_tracks_only_trainable_parameters(self):
         config = DHGAConfig()
         model = DHGASmokeModel(config)
@@ -455,6 +633,12 @@ class DHGAStaticTests(unittest.TestCase):
         self.assertAlmostEqual(DHGAConfig(dhga_router_target_weight=0.25).dhga_router_target_weight, 0.25)
         with self.assertRaises(ValueError):
             DHGAConfig(dhga_router_target_weight=-0.1)
+
+    def test_boundary_recovery_zero_weight_default_is_configurable(self):
+        self.assertAlmostEqual(DHGAConfig().dhga_boundary_recovery_zero_weight, 0.25)
+        self.assertAlmostEqual(DHGAConfig(dhga_boundary_recovery_zero_weight=0.1).dhga_boundary_recovery_zero_weight, 0.1)
+        with self.assertRaises(ValueError):
+            DHGAConfig(dhga_boundary_recovery_zero_weight=-0.1)
 
     def test_router_supervision_weight_prioritizes_foreground_and_disagreement(self):
         router = DisagreementRouter("none")

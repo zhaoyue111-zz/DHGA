@@ -125,6 +125,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dhga_corruption_max_offset_mm", type=float, default=3.0)
     parser.add_argument("--dhga_corruption_modes", nargs="*", default=["inward", "outward"])
     parser.add_argument("--dhga_boundary_recovery_weight", type=float, default=1.0)
+    parser.add_argument("--dhga_boundary_recovery_zero_weight", type=float, default=0.25)
     parser.add_argument("--dhga_transport_equivariance_weight", type=float, default=0.1)
     parser.add_argument("--dhga_prompt_ranking_weight", type=float, default=0.0)
     parser.add_argument("--dhga_minimal_transport_weight", type=float, default=0.01)
@@ -235,6 +236,7 @@ def config_from_args(args: argparse.Namespace) -> DHGAConfig:
         dhga_corruption_max_offset_mm=args.dhga_corruption_max_offset_mm,
         dhga_corruption_modes=list(args.dhga_corruption_modes),
         dhga_boundary_recovery_weight=args.dhga_boundary_recovery_weight,
+        dhga_boundary_recovery_zero_weight=args.dhga_boundary_recovery_zero_weight,
         dhga_transport_equivariance_weight=args.dhga_transport_equivariance_weight,
         dhga_prompt_ranking_weight=args.dhga_prompt_ranking_weight,
         dhga_minimal_transport_weight=args.dhga_minimal_transport_weight,

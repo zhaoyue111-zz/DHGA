@@ -37,6 +37,43 @@ def boundary_recovery_loss(predicted_displacement: Tensor, target_displacement: 
     return (loss * valid_mask.detach()).sum() / valid_mask.detach().sum().clamp_min(1.0)
 
 
+def _masked_mean_or_zero(values: Tensor, mask: Tensor) -> Tensor:
+    count = mask.detach().float().sum()
+    if bool((count > 0).detach().cpu()):
+        return values[mask].mean()
+    return values[mask].sum() * 0.0
+
+
+def balanced_boundary_recovery_loss(
+    predicted_displacement: Tensor,
+    target_displacement: Tensor,
+    valid_mask: Tensor,
+    near_zero_threshold_mm: float,
+    zero_weight: float = 0.25,
+) -> tuple[Tensor, dict[str, Tensor]]:
+    target = target_displacement.detach()
+    valid = valid_mask.detach().bool()
+    threshold = max(1e-4, float(near_zero_threshold_mm))
+    point_loss = (predicted_displacement - target).abs()
+    nonzero_mask = valid & (target.abs() > threshold)
+    zero_mask = valid & (target.abs() <= threshold)
+    move_loss = _masked_mean_or_zero(point_loss, nonzero_mask)
+    stay_loss = _masked_mean_or_zero(point_loss, zero_mask)
+    loss = move_loss + float(zero_weight) * stay_loss
+    pred_nonzero = predicted_displacement.detach().abs() > threshold
+    sign_match = torch.sign(predicted_displacement.detach()) == torch.sign(target)
+    sign_correct = nonzero_mask & pred_nonzero & sign_match
+    nonzero_count = nonzero_mask.float().sum()
+    sign_agreement = sign_correct.float().sum() / nonzero_count.clamp_min(1.0)
+    return loss, {
+        "nonzero_loss": move_loss.detach(),
+        "zero_loss": stay_loss.detach(),
+        "nonzero_count": nonzero_count.detach(),
+        "zero_count": zero_mask.float().sum().detach(),
+        "sign_agreement": sign_agreement.detach(),
+    }
+
+
 def minimal_transport_loss(displacement: Tensor, weight: Tensor | None = None) -> Tensor:
     loss = displacement.abs()
     if weight is None:

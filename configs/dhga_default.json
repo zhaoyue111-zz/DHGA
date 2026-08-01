@@ -46,6 +46,7 @@
   "dhga_corruption_max_offset_mm": 3.0,
   "dhga_corruption_modes": ["inward", "outward"],
   "dhga_boundary_recovery_weight": 1.0,
+  "dhga_boundary_recovery_zero_weight": 0.25,
   "dhga_transport_equivariance_weight": 0.1,
   "dhga_prompt_ranking_weight": 0.0,
   "dhga_minimal_transport_weight": 0.01,
