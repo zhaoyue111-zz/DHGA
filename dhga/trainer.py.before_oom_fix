@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import gc
 import json
 import random
 from dataclasses import asdict, dataclass
@@ -640,10 +639,6 @@ class DHGAStageTrainer:
         eval_config = DHGAConfig.from_mapping(values)
         eval_dir = self.save_dir / f"eval_epoch_{epoch:04d}"
         was_training = self.model.training
-        gc.collect()
-        if self.device.type == "cuda":
-            torch.cuda.empty_cache()
-            torch.cuda.reset_peak_memory_stats(self.device)
         evaluator = DHGAEvaluator(
             eval_config,
             self.prompts,
@@ -657,10 +652,6 @@ class DHGAStageTrainer:
             metrics = evaluator.evaluate_split("test", 0)
         finally:
             self.model.train(was_training)
-            del evaluator
-            gc.collect()
-            if self.device.type == "cuda":
-                torch.cuda.empty_cache()
         if self.writer is not None:
             for key, value in metrics.items():
                 if key != "rows" and isinstance(value, (int, float)) and value is not None:
