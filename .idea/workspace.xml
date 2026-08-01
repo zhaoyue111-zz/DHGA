@@ -5,6 +5,29 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="6fb578aa-0101-4d98-adb8-1c85a67dd3aa" name="Changes" comment="tensorboard">
+      <change afterPath="$PROJECT_DIR$/.idea/DHGA.iml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/.idea/inspectionProfiles/Project_Default.xml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/.idea/inspectionProfiles/profiles_settings.xml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/.idea/misc.xml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/.idea/sshConfigs.xml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/.idea/vcs.xml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/.idea/webServers.xml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/.save/dhga/stage_b_full_v42/dhga_config.json" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/.save/dhga/stage_b_full_v42/eval_epoch_0002/metrics.json" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/.save/dhga/stage_b_full_v42/eval_epoch_0004/metrics.json" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/.save/dhga/stage_b_full_v42/eval_epoch_0006/metrics.json" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/.save/dhga/stage_b_full_v42/eval_epoch_0008/metrics.json" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/.save/dhga/stage_b_full_v42/eval_epoch_0010/metrics.json" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/.save/dhga/stage_b_full_v42/eval_epoch_0012/metrics.json" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/.save/dhga/stage_b_full_v42/eval_epoch_0014/metrics.json" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/.save/dhga/stage_b_full_v42/eval_epoch_0016/metrics.json" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/.save/dhga/stage_b_full_v42/eval_epoch_0018/metrics.json" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/.save/dhga/stage_b_full_v42/eval_epoch_0020/metrics.json" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/.save/dhga/stage_b_full_v42/eval_epoch_0022/metrics.json" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/.save/dhga/stage_b_full_v42/eval_epoch_0024/metrics.json" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/.save/dhga/stage_b_full_v42/eval_epoch_0026/metrics.json" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/.save/dhga/stage_b_full_v42/eval_epoch_0028/metrics.json" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/deployment.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/deployment.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
@@ -15,6 +38,7 @@
   <component name="CopilotPersistence">
     <persistenceIdMap>
       <entry key="_/data/zy/DHGA" value="3H57nbHSOtqCD1Uok02xJlNK5qD" />
+      <entry key="_D:/pythonCode/DHGA" value="3HIwR7oEI3LvBdAX19E8V4ZbDWu" />
     </persistenceIdMap>
   </component>
   <component name="EmbeddingIndexingInfo">
@@ -32,7 +56,7 @@
   <component name="GithubPullRequestsUISettings">{
   &quot;selectedUrlAndAccountId&quot;: {
     &quot;url&quot;: &quot;https://github.com/zhaoyue111-zz/DHGA.git&quot;,
-    &quot;accountId&quot;: &quot;4f094fe0-aa67-402d-a78e-7004a55271f5&quot;
+    &quot;accountId&quot;: &quot;b59be5ab-a1d9-4e97-96e7-02b269aff237&quot;
   }
 }</component>
   <component name="McpProjectServerCommands">
@@ -48,31 +72,31 @@
     <option name="hideEmptyMiddlePackages" value="true" />
     <option name="showLibraryContents" value="true" />
   </component>
-  <component name="PropertiesComponent">{
-  &quot;keyToString&quot;: {
-    &quot;ModuleVcsDetector.initialDetectionPerformed&quot;: &quot;true&quot;,
-    &quot;RunOnceActivity.MCP Project settings loaded&quot;: &quot;true&quot;,
-    &quot;RunOnceActivity.ShowReadmeOnStart&quot;: &quot;true&quot;,
-    &quot;RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252&quot;: &quot;true&quot;,
-    &quot;RunOnceActivity.git.unshallow&quot;: &quot;true&quot;,
-    &quot;RunOnceActivity.typescript.service.memoryLimit.init&quot;: &quot;true&quot;,
-    &quot;WebServerToolWindowPanel.toolwindow.highlight.mappings&quot;: &quot;true&quot;,
-    &quot;WebServerToolWindowPanel.toolwindow.highlight.symlinks&quot;: &quot;true&quot;,
-    &quot;WebServerToolWindowPanel.toolwindow.show.date&quot;: &quot;false&quot;,
-    &quot;WebServerToolWindowPanel.toolwindow.show.permissions&quot;: &quot;false&quot;,
-    &quot;WebServerToolWindowPanel.toolwindow.show.size&quot;: &quot;false&quot;,
-    &quot;codeWithMe.voiceChat.enabledByDefault&quot;: &quot;false&quot;,
-    &quot;git-widget-placeholder&quot;: &quot;main&quot;,
-    &quot;last_opened_file_path&quot;: &quot;/data/医保大赛/code/SANet&quot;,
-    &quot;node.js.detected.package.eslint&quot;: &quot;true&quot;,
-    &quot;node.js.detected.package.tslint&quot;: &quot;true&quot;,
-    &quot;node.js.selected.package.eslint&quot;: &quot;(autodetect)&quot;,
-    &quot;node.js.selected.package.tslint&quot;: &quot;(autodetect)&quot;,
-    &quot;nodejs_package_manager_path&quot;: &quot;npm&quot;,
-    &quot;settings.editor.selected.configurable&quot;: &quot;com.aito.ass.toolkit.settings.CodeAssistSettingsConfigurable&quot;,
-    &quot;vue.rearranger.settings.migration&quot;: &quot;true&quot;
+  <component name="PropertiesComponent"><![CDATA[{
+  "keyToString": {
+    "ModuleVcsDetector.initialDetectionPerformed": "true",
+    "RunOnceActivity.MCP Project settings loaded": "true",
+    "RunOnceActivity.ShowReadmeOnStart": "true",
+    "RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252": "true",
+    "RunOnceActivity.git.unshallow": "true",
+    "RunOnceActivity.typescript.service.memoryLimit.init": "true",
+    "WebServerToolWindowPanel.toolwindow.highlight.mappings": "true",
+    "WebServerToolWindowPanel.toolwindow.highlight.symlinks": "true",
+    "WebServerToolWindowPanel.toolwindow.show.date": "false",
+    "WebServerToolWindowPanel.toolwindow.show.permissions": "false",
+    "WebServerToolWindowPanel.toolwindow.show.size": "false",
+    "codeWithMe.voiceChat.enabledByDefault": "false",
+    "git-widget-placeholder": "main",
+    "last_opened_file_path": "/data/医保大赛/code/SANet",
+    "node.js.detected.package.eslint": "true",
+    "node.js.detected.package.tslint": "true",
+    "node.js.selected.package.eslint": "(autodetect)",
+    "node.js.selected.package.tslint": "(autodetect)",
+    "nodejs_package_manager_path": "npm",
+    "settings.editor.selected.configurable": "preferences.pluginManager",
+    "vue.rearranger.settings.migration": "true"
   }
-}</component>
+}]]></component>
   <component name="RecentsManager">
     <key name="CopyFile.RECENT_KEYS">
       <recent name="$PROJECT_DIR$" />
@@ -81,7 +105,8 @@
   <component name="SharedIndexes">
     <attachedChunks>
       <set>
-        <option value="bundled-python-sdk-b63d5a1f7c97-b61e75351b1f-com.jetbrains.pycharm.pro.sharedIndexes.bundled-PY-261.22158.340" />
+        <option value="bundled-js-predefined-d6986cc7102b-b26f3e71634d-JavaScript-PY-251.26094.141" />
+        <option value="bundled-python-sdk-9f8e2b94138c-36ea0e71a18c-com.jetbrains.pycharm.pro.sharedIndexes.bundled-PY-251.26094.141" />
       </set>
     </attachedChunks>
   </component>
@@ -93,6 +118,8 @@
       <option name="presentableId" value="Default" />
       <updated>1785146243950</updated>
       <workItem from="1785146244991" duration="50389000" />
+      <workItem from="1785568881614" duration="319000" />
+      <workItem from="1785569468951" duration="4251000" />
     </task>
     <task id="LOCAL-00001" summary="add voxtell_sfda module">
       <option name="closed" value="true" />
