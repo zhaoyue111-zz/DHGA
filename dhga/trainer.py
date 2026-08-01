@@ -12,7 +12,7 @@ from torch import Tensor, nn
 from tqdm import tqdm
 
 from .augment import weak_strong_intensity_views
-from .checkpoint import load_training_checkpoint, save_training_checkpoint
+from .checkpoint import STAGE_C_FRESH_GEOMETRY_PREFIXES, load_training_checkpoint, save_training_checkpoint
 from .config import DHGAConfig
 from .experts import AppearanceExpert, SemanticExpert
 from .geometry import GeometryTransportHead, extract_boundary_points, make_ray_offsets_mm, mask_to_sdf
@@ -300,11 +300,19 @@ class DHGAStageTrainer:
                 self.best_epoch = int(metadata["best_epoch"])
             return
         if self.config.init_checkpoint:
-            load_training_checkpoint(
+            skip_prefixes = STAGE_C_FRESH_GEOMETRY_PREFIXES if self.config.dhga_stage == "C" else ()
+            payload = load_training_checkpoint(
                 self.config.init_checkpoint,
                 self.model,
                 load_training_state=False,
+                skip_model_prefixes=skip_prefixes,
             )
+            skipped = payload.get("skipped_model_keys", [])
+            if skipped:
+                print(
+                    "Stage C init kept fresh geometry modules; skipped checkpoint keys with prefixes "
+                    f"{tuple(skip_prefixes)} ({len(skipped)} tensors)."
+                )
             if self.teacher is not None:
                 self.teacher.sync_from(self.model)
             self._set_stage_trainability()
@@ -948,8 +956,30 @@ class DHGAStageTrainer:
         )
         target = sampled_target[:, :, 0, 0]
         valid = valid_target[:, :, 0] & geometry["valid_boundary_points"]
-        recovery = boundary_recovery_loss(geometry["sparse_displacement_mm"], target, valid.float())
-        minimal = minimal_transport_loss(geometry["sparse_displacement_mm"], valid.float())
+        displacement = geometry["sparse_displacement_mm"]
+        recovery = boundary_recovery_loss(displacement, target, valid.float())
+        minimal = minimal_transport_loss(displacement, valid.float())
+        disp_detached = displacement.detach().float()
+        valid_detached = valid.detach().bool()
+        valid_count = int(valid_detached.sum().cpu())
+        total_points = int(valid_detached.numel())
+        near_zero_threshold = max(1e-4, 0.25 * float(self.config.dhga_ray_step_mm))
+        if valid_count > 0:
+            valid_disp = disp_detached[valid_detached]
+            abs_disp = float(valid_disp.abs().mean().cpu())
+            near_zero = valid_disp.abs() <= near_zero_threshold
+            positive = valid_disp > near_zero_threshold
+            negative = valid_disp < -near_zero_threshold
+            near_zero_ratio = float(near_zero.float().mean().cpu())
+            positive_ratio = float(positive.float().mean().cpu())
+            negative_ratio = float(negative.float().mean().cpu())
+            nonzero_ratio = float((~near_zero).float().mean().cpu())
+        else:
+            abs_disp = 0.0
+            near_zero_ratio = 0.0
+            positive_ratio = 0.0
+            negative_ratio = 0.0
+            nonzero_ratio = 0.0
         return recovery, minimal, {
             "dhga_boundary_recovery_loss": float(recovery.detach().cpu()),
             "dhga_minimal_transport_loss": float(minimal.detach().cpu()),
@@ -957,6 +987,13 @@ class DHGAStageTrainer:
             "dhga_outward_corruptions": float(choices[..., 1].mean().detach().cpu()),
             "dhga_zero_corruptions": float(choices[..., 2].mean().detach().cpu()),
             "dhga_valid_boundary_points": float(valid.float().mean().detach().cpu()),
+            "dhga_valid_boundary_point_count": float(valid_count),
+            "dhga_total_boundary_point_slots": float(total_points),
+            "dhga_pred_abs_displacement_mm": abs_disp,
+            "dhga_pred_positive_displacement_ratio": positive_ratio,
+            "dhga_pred_negative_displacement_ratio": negative_ratio,
+            "dhga_pred_near_zero_displacement_ratio": near_zero_ratio,
+            "dhga_pred_nonzero_displacement_ratio": nonzero_ratio,
             "dhga_reused_teacher_forward": float(reused_teacher),
             "dhga_reused_student_forward": float(reused_student),
         }

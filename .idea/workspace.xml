@@ -4,31 +4,14 @@
     <option name="autoReloadType" value="ALL" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="6fb578aa-0101-4d98-adb8-1c85a67dd3aa" name="Changes" comment="tensorboard">
-      <change afterPath="$PROJECT_DIR$/.idea/DHGA.iml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.idea/inspectionProfiles/Project_Default.xml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.idea/inspectionProfiles/profiles_settings.xml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.idea/misc.xml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.idea/sshConfigs.xml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.idea/vcs.xml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.idea/webServers.xml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.save/dhga/stage_b_full_v42/dhga_config.json" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.save/dhga/stage_b_full_v42/eval_epoch_0002/metrics.json" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.save/dhga/stage_b_full_v42/eval_epoch_0004/metrics.json" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.save/dhga/stage_b_full_v42/eval_epoch_0006/metrics.json" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.save/dhga/stage_b_full_v42/eval_epoch_0008/metrics.json" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.save/dhga/stage_b_full_v42/eval_epoch_0010/metrics.json" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.save/dhga/stage_b_full_v42/eval_epoch_0012/metrics.json" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.save/dhga/stage_b_full_v42/eval_epoch_0014/metrics.json" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.save/dhga/stage_b_full_v42/eval_epoch_0016/metrics.json" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.save/dhga/stage_b_full_v42/eval_epoch_0018/metrics.json" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.save/dhga/stage_b_full_v42/eval_epoch_0020/metrics.json" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.save/dhga/stage_b_full_v42/eval_epoch_0022/metrics.json" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.save/dhga/stage_b_full_v42/eval_epoch_0024/metrics.json" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.save/dhga/stage_b_full_v42/eval_epoch_0026/metrics.json" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.save/dhga/stage_b_full_v42/eval_epoch_0028/metrics.json" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/deployment.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/deployment.xml" afterDir="false" />
+    <list default="true" id="6fb578aa-0101-4d98-adb8-1c85a67dd3aa" name="Changes" comment="stage v42结果">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/dhga/checkpoint.py" beforeDir="false" afterPath="$PROJECT_DIR$/dhga/checkpoint.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/dhga/geometry/transport_head.py" beforeDir="false" afterPath="$PROJECT_DIR$/dhga/geometry/transport_head.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/dhga/trainer.py" beforeDir="false" afterPath="$PROJECT_DIR$/dhga/trainer.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/smoke_stage_c.sh" beforeDir="false" afterPath="$PROJECT_DIR$/smoke_stage_c.sh" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/test_dhga_static.py" beforeDir="false" afterPath="$PROJECT_DIR$/tests/test_dhga_static.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/train_stage_c.sh" beforeDir="false" afterPath="$PROJECT_DIR$/train_stage_c.sh" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -119,7 +102,7 @@
       <updated>1785146243950</updated>
       <workItem from="1785146244991" duration="50389000" />
       <workItem from="1785568881614" duration="319000" />
-      <workItem from="1785569468951" duration="4251000" />
+      <workItem from="1785569468951" duration="5784000" />
     </task>
     <task id="LOCAL-00001" summary="add voxtell_sfda module">
       <option name="closed" value="true" />
@@ -153,7 +136,15 @@
       <option name="project" value="LOCAL" />
       <updated>1785157880612</updated>
     </task>
-    <option name="localTasksCounter" value="5" />
+    <task id="LOCAL-00005" summary="stage v42结果">
+      <option name="closed" value="true" />
+      <created>1785589075472</created>
+      <option name="number" value="00005" />
+      <option name="presentableId" value="LOCAL-00005" />
+      <option name="project" value="LOCAL" />
+      <updated>1785589075472</updated>
+    </task>
+    <option name="localTasksCounter" value="6" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -163,7 +154,8 @@
     <MESSAGE value="add voxtell_sfda module" />
     <MESSAGE value="refix" />
     <MESSAGE value="tensorboard" />
-    <option name="LAST_COMMIT_MESSAGE" value="tensorboard" />
+    <MESSAGE value="stage v42结果" />
+    <option name="LAST_COMMIT_MESSAGE" value="stage v42结果" />
   </component>
   <component name="github-copilot-workspace">
     <instructionFileLocations>

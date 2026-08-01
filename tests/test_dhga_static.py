@@ -9,7 +9,7 @@ import unittest
 
 import torch
 
-from dhga.checkpoint import load_dhga_checkpoint, load_training_checkpoint, save_dhga_checkpoint, save_training_checkpoint
+from dhga.checkpoint import STAGE_C_FRESH_GEOMETRY_PREFIXES, load_dhga_checkpoint, load_training_checkpoint, save_dhga_checkpoint, save_training_checkpoint
 from dhga.config import DHGAConfig
 from dhga.experts import AppearanceExpert, AppearanceFeatureAdapter, SemanticExpert
 from dhga.geometry.boundary_corruption import make_bidirectional_corruption, make_local_boundary_corruption
@@ -163,6 +163,17 @@ class DHGAStaticTests(unittest.TestCase):
         offsets = make_ray_offsets_mm(5.5, 2.0)
         self.assertTrue(bool((offsets.abs() <= 5.5 + 1e-6).all()))
         self.assertTrue(bool((offsets == 0).any()))
+
+    def test_geometry_transport_head_zero_prior_is_mild(self):
+        offsets = torch.arange(-3.0, 4.0)
+        head = GeometryTransportHead(1, offsets)
+        self.assertAlmostEqual(float(head.center_bias.detach()), 2.0, places=5)
+        self.assertTrue(torch.allclose(head.zero_displacement_prior, -offsets.abs()))
+        out = head(torch.zeros(1, 1, offsets.numel(), 1))
+        center_prob = float(out["prob"][0, 0, head.center_index].detach())
+        nonzero_prob = float(out["prob"][0, 0][offsets != 0].sum().detach())
+        self.assertGreater(nonzero_prob, 0.1)
+        self.assertLess(center_prob, 0.9)
 
     def test_bidirectional_corruption_recovery_sign(self):
         sdf = torch.zeros(8, 1, 7, 7, 7)
@@ -381,6 +392,83 @@ class DHGAStaticTests(unittest.TestCase):
             payload = load_training_checkpoint(path, model, optim, model, scaler)
         self.assertEqual(int(payload["epoch"]), 3)
         self.assertEqual(int(payload["global_step"]), 17)
+
+    def test_stage_b_to_c_init_keeps_fresh_geometry_but_resume_restores_it(self):
+        class TinyStageModel(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.semantic_expert = torch.nn.Linear(1, 1)
+                self.appearance_expert = torch.nn.Linear(1, 1)
+                self.router = torch.nn.Linear(1, 1)
+                self.geometry_head = torch.nn.Linear(1, 1)
+                self.ray_tokens = torch.nn.Linear(1, 1)
+                self.geometry_visual_proj = torch.nn.Conv3d(1, 1, 1)
+
+        def fill_module(module: torch.nn.Module, value: float) -> None:
+            with torch.no_grad():
+                for param in module.parameters():
+                    param.fill_(value)
+
+        tmp = Path(".save") / "unit_checkpoint_tests"
+        tmp.mkdir(parents=True, exist_ok=True)
+        stage_b_path = tmp / "stage_b_to_c_init.pt"
+        stage_c_path = tmp / "stage_c_resume.pt"
+        try:
+            source_b = TinyStageModel()
+            fill_module(source_b.semantic_expert, 2.0)
+            fill_module(source_b.appearance_expert, 3.0)
+            fill_module(source_b.router, 4.0)
+            fill_module(source_b.geometry_head, 90.0)
+            fill_module(source_b.ray_tokens, 91.0)
+            fill_module(source_b.geometry_visual_proj, 92.0)
+            save_training_checkpoint(stage_b_path, source_b, DHGAConfig(dhga_stage="B"), metadata={"stage": "B"})
+
+            stage_c_init = TinyStageModel()
+            geometry_before = {
+                name: tensor.detach().clone()
+                for name, tensor in stage_c_init.state_dict().items()
+                if name.startswith(STAGE_C_FRESH_GEOMETRY_PREFIXES)
+            }
+            init_payload = load_training_checkpoint(
+                stage_b_path,
+                stage_c_init,
+                load_training_state=False,
+                skip_model_prefixes=STAGE_C_FRESH_GEOMETRY_PREFIXES,
+            )
+            self.assertIn("geometry_head.weight", init_payload["skipped_model_keys"])
+            self.assertTrue(torch.allclose(stage_c_init.semantic_expert.weight, torch.full_like(stage_c_init.semantic_expert.weight, 2.0)))
+            self.assertTrue(torch.allclose(stage_c_init.appearance_expert.weight, torch.full_like(stage_c_init.appearance_expert.weight, 3.0)))
+            self.assertTrue(torch.allclose(stage_c_init.router.weight, torch.full_like(stage_c_init.router.weight, 4.0)))
+            for name, tensor in stage_c_init.state_dict().items():
+                if name.startswith(STAGE_C_FRESH_GEOMETRY_PREFIXES):
+                    self.assertTrue(torch.allclose(tensor, geometry_before[name]), msg=f"{name} should keep source-code initialization")
+
+            source_c = TinyStageModel()
+            fill_module(source_c.geometry_head, 7.0)
+            fill_module(source_c.ray_tokens, 8.0)
+            fill_module(source_c.geometry_visual_proj, 9.0)
+            optim_c = torch.optim.AdamW(source_c.parameters(), lr=1e-3)
+            loss = sum(param.sum() for param in source_c.parameters())
+            loss.backward()
+            optim_c.step()
+            saved_geometry = {
+                name: tensor.detach().clone()
+                for name, tensor in source_c.state_dict().items()
+                if name.startswith(STAGE_C_FRESH_GEOMETRY_PREFIXES)
+            }
+            save_training_checkpoint(stage_c_path, source_c, DHGAConfig(dhga_stage="C"), optimizer=optim_c, metadata={"stage": "C"})
+
+            resumed_c = TinyStageModel()
+            resumed_optim = torch.optim.AdamW(resumed_c.parameters(), lr=5e-4)
+            resume_payload = load_training_checkpoint(stage_c_path, resumed_c, resumed_optim, expected_stage="C")
+            self.assertEqual(resume_payload["skipped_model_keys"], [])
+            for name, tensor in resumed_c.state_dict().items():
+                if name.startswith(STAGE_C_FRESH_GEOMETRY_PREFIXES):
+                    self.assertTrue(torch.allclose(tensor, saved_geometry[name]), msg=f"{name} should restore on Stage C resume")
+            self.assertGreater(len(resumed_optim.state_dict()["state"]), 0)
+        finally:
+            stage_b_path.unlink(missing_ok=True)
+            stage_c_path.unlink(missing_ok=True)
 
     def test_ema_teacher_tracks_only_trainable_parameters(self):
         config = DHGAConfig()

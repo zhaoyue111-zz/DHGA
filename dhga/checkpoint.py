@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 import random
@@ -12,6 +13,27 @@ from .config import DHGAConfig
 
 
 DHGA_PREFIX = "dhga"
+STAGE_C_FRESH_GEOMETRY_PREFIXES = ("geometry_head.", "ray_tokens.", "geometry_visual_proj.")
+
+
+def _load_model_state(
+    model: nn.Module,
+    state: dict[str, Any],
+    skip_model_prefixes: Iterable[str] = (),
+) -> list[str]:
+    prefixes = tuple(skip_model_prefixes)
+    if not prefixes:
+        model.load_state_dict(state, strict=True)
+        return []
+    filtered = {name: tensor for name, tensor in state.items() if not name.startswith(prefixes)}
+    skipped = sorted(name for name in state if name.startswith(prefixes))
+    incompatible = model.load_state_dict(filtered, strict=False)
+    allowed_missing = {name for name in model.state_dict() if name.startswith(prefixes)}
+    bad_missing = sorted(set(incompatible.missing_keys) - allowed_missing)
+    unexpected = sorted(incompatible.unexpected_keys)
+    if bad_missing or unexpected:
+        raise RuntimeError(f"Checkpoint state mismatch missing={bad_missing} unexpected={unexpected}")
+    return skipped
 
 
 def save_dhga_checkpoint(path: str | Path, modules: dict[str, nn.Module], config: DHGAConfig, metadata: dict[str, Any] | None = None) -> None:
@@ -63,21 +85,25 @@ def load_training_checkpoint(
     scaler: Any | None = None,
     load_training_state: bool = True,
     expected_stage: str | None = None,
+    skip_model_prefixes: Iterable[str] = (),
 ) -> dict[str, Any]:
+    skip_model_prefixes = tuple(skip_model_prefixes)
+    if skip_model_prefixes and load_training_state:
+        raise ValueError("skip_model_prefixes is only supported for model-only init checkpoint loads")
     payload = torch.load(path, map_location="cpu", weights_only=False)
     if payload.get("format") == "dhga_checkpoint_v1":
         state = payload["state_dicts"].get("dhga_model")
         if state is None:
             raise RuntimeError("DHGA checkpoint does not contain dhga_model")
-        model.load_state_dict(state, strict=True)
-        return {"epoch": 0, "global_step": 0, "metadata": payload.get("metadata", {})}
+        skipped = _load_model_state(model, state, skip_model_prefixes)
+        return {"epoch": 0, "global_step": 0, "metadata": payload.get("metadata", {}), "skipped_model_keys": skipped}
     if payload.get("format") != "dhga_training_checkpoint_v1":
         raise RuntimeError("Not a DHGA training checkpoint")
     metadata = payload.get("metadata", {})
     checkpoint_stage = metadata.get("stage") or payload.get("config", {}).get("dhga_stage")
     if expected_stage is not None and checkpoint_stage is not None and str(checkpoint_stage) != str(expected_stage):
         raise RuntimeError(f"Checkpoint stage {checkpoint_stage} does not match current stage {expected_stage}")
-    model.load_state_dict(payload["model"], strict=True)
+    skipped = _load_model_state(model, payload["model"], skip_model_prefixes)
     if load_training_state and optimizer is not None and payload.get("optimizer") is not None:
         optimizer.load_state_dict(payload["optimizer"])
     if load_training_state and ema is not None and payload.get("ema") is not None:
@@ -92,6 +118,7 @@ def load_training_checkpoint(
             np.random.set_state(payload["rng_state"]["numpy"])
         if torch.cuda.is_available() and payload["rng_state"].get("cuda") is not None:
             torch.cuda.set_rng_state_all(payload["rng_state"]["cuda"])
+    payload["skipped_model_keys"] = skipped
     return payload
 
 

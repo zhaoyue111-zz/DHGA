@@ -22,9 +22,9 @@ class GeometryTransportHead(nn.Module):
         nn.init.zeros_(self.net[-1].bias)
         center = int(torch.argmin(self.offsets_mm.abs()).item())
         self.center_index = center
-        self.center_bias = nn.Parameter(torch.tensor(12.0))
+        self.center_bias = nn.Parameter(torch.tensor(2.0))
         step = torch.diff(self.offsets_mm).abs().min().clamp_min(1e-6) if self.offsets_mm.numel() > 1 else torch.tensor(1.0)
-        prior = -8.0 * self.offsets_mm.abs() / step # # 距离0越远，先验分值越低
+        prior = -1.0 * self.offsets_mm.abs() / step # # 距离0越远，先验分值越低
         prior[center] = 0.0
         self.register_buffer("zero_displacement_prior", prior.float())
 
