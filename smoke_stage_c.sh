@@ -6,6 +6,7 @@ CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}" conda run -n voxtell python ru
   --dhga_stage C \
   --init_checkpoint .save/dhga/stage_b_full_v42/best_stage_b.pt \
   --dhga_geometry_enabled \
+  --dhga_validation_interval_epochs 99  \
   --dhga_geometry_max_displacement_mm 3.0 \
   --dhga_geometry_boundary_band_mm 6.0 \
   --dhga_search_radius_mm 6.0 \
@@ -16,10 +17,10 @@ CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}" conda run -n voxtell python ru
   --dhga_corruption_max_offset_mm 3.0 \
   --dhga_corruption_modes inward outward \
   --save_dir .save/dhga/stage_c_v42_smoke \
-  --voxtell_repo /data/zy/VoxTell_from_disk \
-  --model_dir /data/zy/VoxTell_from_disk/model \
-  --data_dir /data/zy/CT_MRI_DATA_3D/images/P0 \
-  --split_manifest /data/zy/DHGA/worst_zeroshot_split_p0/worst_zeroshot_split.json \
+  --voxtell_repo /mnt/afs2/zy/VoxTell_from_disk \
+  --model_dir /mnt/afs2/zy/VoxTell_from_disk/model \
+  --data_dir /mnt/afs2/zy/CT_MRI_DATA_3D/images/P0 \
+  --split_manifest /mnt/afs2/zy/DHGA/worst_zeroshot_split_p0/worst_zeroshot_split.json \
   --sequences P0 \
   --prompts liver \
   --prompt_templates "{}" \
