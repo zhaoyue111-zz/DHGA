@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}" conda run -n voxtell python run_3d_dhga.py \
+python run_3d_dhga.py \
   --train \
   --dhga_stage C \
   --init_checkpoint .save/dhga/stage_b_full_v42/best_stage_b.pt \
