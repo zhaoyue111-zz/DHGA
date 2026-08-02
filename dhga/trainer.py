@@ -1109,11 +1109,13 @@ class DHGAStageTrainer:
         log_interval: int = 20,
         snapshot_steps: tuple[int, ...] = (0, 20, 40, 100, 200),
         max_resample_attempts: int = 64,
+        fixed_sample_path: str | Path = "",
+        resume_checkpoint: str | Path = "",
     ) -> None:
         if self.config.dhga_stage != "C":
             raise RuntimeError("fixed corruption overfit diagnostic requires Stage C")
         self._set_fixed_overfit_trainability()
-        sample = self._build_fixed_stage_c_sample(max_resample_attempts)
+        sample = self._load_fixed_stage_c_sample(fixed_sample_path) if fixed_sample_path else self._build_fixed_stage_c_sample(max_resample_attempts)
         self._assert_fixed_sample_has_all_target_groups(sample)
         self._assert_fixed_sample_stable(sample)
         self._assert_fixed_overfit_trainability()
@@ -1127,15 +1129,33 @@ class DHGAStageTrainer:
         self.scaler = torch.amp.GradScaler("cuda", enabled=False)
         out_dir = self.save_dir
         snapshot_dir = out_dir / "fixed_overfit_snapshots"
+        checkpoint_dir = out_dir / "fixed_overfit_checkpoints"
         snapshot_dir.mkdir(parents=True, exist_ok=True)
-        torch.save(self._fixed_sample_payload(sample), out_dir / "fixed_stage_c_sample.pt")
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        fixed_sample_out = out_dir / "fixed_stage_c_sample.pt"
+        if fixed_sample_out.exists():
+            existing_sample = self._load_fixed_stage_c_sample(fixed_sample_out)
+            self._assert_fixed_sample_matches(sample, self._clone_fixed_sample_tensors(existing_sample))
+        else:
+            torch.save(self._fixed_sample_payload(sample), fixed_sample_out)
         reference = self._clone_fixed_sample_tensors(sample)
         near_zero_threshold = max(1e-4, 0.25 * float(self.config.dhga_ray_step_mm))
+        start_step = 0
+        if resume_checkpoint:
+            start_step = self._load_fixed_overfit_checkpoint(resume_checkpoint, sample)
+            self._assert_fixed_sample_matches(sample, reference)
         self._assert_fixed_prediction_connects_to_geometry_head(sample, near_zero_threshold)
-        history: list[dict[str, float]] = []
-        self._write_fixed_overfit_snapshot(sample, 0, snapshot_dir, near_zero_threshold)
-        history.append(self._fixed_overfit_eval_record(sample, 0, near_zero_threshold, {}))
-        for step in range(1, int(steps) + 1):
+        history = self._load_fixed_overfit_history(out_dir / "fixed_overfit_history.json", max_step=start_step)
+        if start_step in snapshot_steps:
+            self._write_fixed_overfit_snapshot(sample, start_step, snapshot_dir, near_zero_threshold)
+        if start_step == 0:
+            history.append(self._fixed_overfit_eval_record(sample, 0, near_zero_threshold, {}))
+            self._write_fixed_overfit_snapshot(sample, 0, snapshot_dir, near_zero_threshold)
+        elif start_step % int(log_interval) == 0 or start_step in snapshot_steps:
+            record = self._fixed_overfit_eval_record(sample, start_step, near_zero_threshold, {})
+            history.append(record)
+            print(json.dumps(record, sort_keys=True))
+        for step in range(start_step + 1, int(steps) + 1):
             self._assert_fixed_sample_matches(sample, reference)
             self.model.train()
             pred = self._fixed_geometry_prediction(sample)
@@ -1159,6 +1179,8 @@ class DHGAStageTrainer:
                 print(json.dumps(record, sort_keys=True))
             if step in snapshot_steps:
                 self._write_fixed_overfit_snapshot(sample, step, snapshot_dir, near_zero_threshold)
+            if step in snapshot_steps or step == int(steps):
+                self._write_fixed_overfit_checkpoint(sample, step, checkpoint_dir, near_zero_threshold)
         self._assert_fixed_sample_matches(sample, reference)
         (out_dir / "fixed_overfit_history.json").write_text(json.dumps(history, indent=2))
 
@@ -1353,6 +1375,14 @@ class DHGAStageTrainer:
         record.update(grad_metrics)
         return record
 
+    def _load_fixed_overfit_history(self, path: Path, max_step: int) -> list[dict[str, float]]:
+        if not path.exists():
+            return []
+        history = json.loads(path.read_text())
+        if not isinstance(history, list):
+            raise RuntimeError(f"Fixed overfit history is not a list: {path}")
+        return [record for record in history if float(record.get("step", -1)) <= float(max_step)]
+
     def _fixed_geometry_grad_metrics(self) -> dict[str, float]:
         total_sq = 0.0
         nonzero = 0
@@ -1389,6 +1419,70 @@ class DHGAStageTrainer:
             snapshot_dir / f"step_{int(step):04d}.pt",
         )
 
+    def _write_fixed_overfit_checkpoint(self, sample: FixedStageCSample, step: int, checkpoint_dir: Path, near_zero_threshold: float) -> None:
+        payload = {
+            "format": "dhga_fixed_stage_c_overfit_checkpoint_v1",
+            "step": int(step),
+            "config": self.config.to_dict(),
+            "near_zero_threshold_mm": float(near_zero_threshold),
+            "model": self.model.state_dict(),
+            "optimizer": self.optimizer.state_dict() if self.optimizer is not None else None,
+            "fixed_sample_tensors": self._fixed_sample_tensors_cpu(sample),
+        }
+        path = checkpoint_dir / f"step_{int(step):04d}.pt"
+        torch.save(payload, path)
+        torch.save(payload, checkpoint_dir / "latest.pt")
+
+    def _load_fixed_overfit_checkpoint(self, path: str | Path, sample: FixedStageCSample) -> int:
+        checkpoint_path = Path(path)
+        if not checkpoint_path.exists():
+            raise FileNotFoundError(
+                f"Fixed Stage C diagnostic checkpoint not found: {checkpoint_path}. "
+                "Run the 200-step backfill script first, or pass an existing checkpoint with "
+                "--stage_c_fixed_overfit_resume_checkpoint."
+            )
+        payload = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+        if payload.get("format") != "dhga_fixed_stage_c_overfit_checkpoint_v1":
+            raise RuntimeError(f"Not a fixed Stage C overfit checkpoint: {path}")
+        self._assert_fixed_sample_matches_payload(sample, payload.get("fixed_sample_tensors", {}), label="diagnostic checkpoint")
+        self.model.load_state_dict(payload["model"], strict=True)
+        if self.optimizer is None:
+            raise RuntimeError("Fixed Stage C optimizer must be initialized before loading diagnostic checkpoint")
+        optimizer_state = payload.get("optimizer")
+        if optimizer_state is None:
+            raise RuntimeError(f"Fixed Stage C diagnostic checkpoint has no optimizer state: {path}")
+        self.optimizer.load_state_dict(optimizer_state)
+        self._move_optimizer_state_to_device()
+        self._assert_fixed_sample_matches_payload(sample, payload.get("fixed_sample_tensors", {}), label="diagnostic checkpoint after load")
+        return int(payload.get("step", 0))
+
+    def _move_optimizer_state_to_device(self) -> None:
+        if self.optimizer is None:
+            return
+        for state in self.optimizer.state.values():
+            for key, value in list(state.items()):
+                if torch.is_tensor(value):
+                    state[key] = value.to(self.device)
+
+    def _fixed_sample_tensors_cpu(self, sample: FixedStageCSample) -> dict[str, Tensor]:
+        return {name: tensor.detach().cpu() for name, tensor in self._clone_fixed_sample_tensors(sample).items()}
+
+    def _assert_fixed_sample_matches_payload(self, sample: FixedStageCSample, payload_tensors: object, label: str) -> None:
+        if not isinstance(payload_tensors, dict):
+            raise RuntimeError(f"Fixed Stage C {label} does not contain sample tensors")
+        current = self._clone_fixed_sample_tensors(sample)
+        required = ("target_displacement_mm", "ray_tokens", "valid_points", "ray_valid_mask")
+        missing_required = [name for name in required if name not in payload_tensors]
+        if missing_required:
+            raise RuntimeError(f"Fixed Stage C {label} is missing required tensors {missing_required}")
+        missing = sorted(set(current) - set(payload_tensors))
+        if missing:
+            raise RuntimeError(f"Fixed Stage C {label} is missing cached tensors {missing}")
+        for key, value in current.items():
+            saved = payload_tensors[key].to(device=value.device, dtype=value.dtype) if torch.is_tensor(payload_tensors[key]) else payload_tensors[key]
+            if not torch.is_tensor(saved) or not torch.equal(value, saved):
+                raise RuntimeError(f"Fixed Stage C sample does not match {label}: {key}")
+
     def _fixed_sample_payload(self, sample: FixedStageCSample) -> dict[str, object]:
         return {
             "case_path": sample.case_path,
@@ -1408,6 +1502,44 @@ class DHGAStageTrainer:
             "ray_offsets_mm": sample.ray_offsets_mm.detach().cpu(),
             "choices": sample.choices.detach().cpu(),
         }
+
+    def _load_fixed_stage_c_sample(self, path: str | Path) -> FixedStageCSample:
+        payload = torch.load(Path(path), map_location=self.device, weights_only=False)
+        if not isinstance(payload, dict):
+            raise RuntimeError(f"Fixed Stage C sample payload must be a dict: {path}")
+
+        def tensor(name: str) -> Tensor:
+            value = payload.get(name)
+            if not torch.is_tensor(value):
+                raise RuntimeError(f"Fixed Stage C sample is missing tensor {name}: {path}")
+            return value.to(self.device).detach().clone()
+
+        raw_ray_samples = payload.get("ray_samples")
+        if not isinstance(raw_ray_samples, dict) or not raw_ray_samples:
+            raise RuntimeError(f"Fixed Stage C sample is missing cached ray_samples: {path}")
+        ray_samples = {}
+        for name, value in raw_ray_samples.items():
+            if not torch.is_tensor(value):
+                raise RuntimeError(f"Fixed Stage C ray sample {name} is not a tensor: {path}")
+            ray_samples[str(name)] = value.to(self.device).detach().clone()
+        return FixedStageCSample(
+            case_path=str(payload.get("case_path", "")),
+            spacing=tuple(float(v) for v in payload.get("spacing", (1.0, 1.0, 1.0))),
+            patch=tensor("patch"),
+            corrupted_sdf=tensor("corrupted_sdf"),
+            recovery_target_volume=tensor("recovery_target_volume"),
+            boundary_points_zyx=tensor("boundary_points_zyx"),
+            boundary_normals_zyx=tensor("boundary_normals_zyx"),
+            valid_boundary_points=tensor("valid_boundary_points").bool(),
+            ray_points_zyx=tensor("ray_points_zyx"),
+            ray_valid_mask=tensor("ray_valid_mask").bool(),
+            ray_tokens=tensor("ray_tokens"),
+            ray_samples=ray_samples,
+            target_displacement_mm=tensor("target_displacement_mm"),
+            valid_points=tensor("valid_points").bool(),
+            ray_offsets_mm=tensor("ray_offsets_mm"),
+            choices=tensor("choices"),
+        )
 
     def _clone_fixed_sample_tensors(self, sample: FixedStageCSample) -> dict[str, Tensor]:
         return {
@@ -1446,8 +1578,10 @@ class DHGAStageTrainer:
             raise RuntimeError("Fixed Stage C ray tokens and valid ray mask shapes do not align")
 
     def _assert_fixed_prediction_connects_to_geometry_head(self, sample: FixedStageCSample, near_zero_threshold: float) -> None:
-        self.optimizer = torch.optim.AdamW([p for p in self.model.geometry_head.parameters() if p.requires_grad], lr=self.config.lr, weight_decay=self.config.weight_decay, foreach=False)
-        self.optimizer.zero_grad(set_to_none=True)
+        if self.optimizer is not None:
+            self.optimizer.zero_grad(set_to_none=True)
+        else:
+            self.model.zero_grad(set_to_none=True)
         pred = self._fixed_geometry_prediction(sample)
         if pred.shape != sample.target_displacement_mm.shape:
             raise RuntimeError("Fixed Stage C prediction and target shapes do not match")
@@ -1463,7 +1597,10 @@ class DHGAStageTrainer:
         recovery.backward()
         if self._fixed_geometry_grad_metrics()["dhga_fixed_geometry_grad_tensors"] <= 0:
             raise RuntimeError("Fixed Stage C cached sample does not backpropagate to geometry_head")
-        self.optimizer.zero_grad(set_to_none=True)
+        if self.optimizer is not None:
+            self.optimizer.zero_grad(set_to_none=True)
+        else:
+            self.model.zero_grad(set_to_none=True)
 
     def _stage_d(self, patch: Tensor, spacing: tuple[float, float, float]) -> tuple[Tensor, dict[str, float]]:
         teacher_out = self._teacher_forward(patch, spacing, run_geometry=False)

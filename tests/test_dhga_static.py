@@ -21,7 +21,7 @@ from dhga.inference import finalize_mask, finalize_probability, geometry_effecti
 from dhga.losses import balanced_boundary_recovery_loss, cross_supervision_loss, weighted_bce_prob
 from dhga.routing import DisagreementRouter
 from dhga.shared_voxtell import SharedEncoderOnce
-from dhga.trainer import DHGASmokeModel, fixed_overfit_prediction_metrics, run_synthetic_smoke, signed_displacement_metrics
+from dhga.trainer import DHGASmokeModel, FixedStageCSample, fixed_overfit_prediction_metrics, run_synthetic_smoke, signed_displacement_metrics
 from dhga.trainer import DHGAStageTrainer
 from dhga.teacher import EMATeacher
 from dhga.text_layer_ensemble import fuse_text_layer_ensemble, summarize_layers, text_layer_training_loss
@@ -1291,6 +1291,78 @@ class DHGAStaticTests(unittest.TestCase):
         self.assertEqual(trainable, {"geometry_head.weight", "geometry_head.bias"})
         trainer.optimizer = torch.optim.AdamW([p for p in trainer.model.geometry_head.parameters() if p.requires_grad], lr=1e-4)
         trainer._assert_fixed_overfit_optimizer()
+
+    def _make_fixed_stage_c_sample(self) -> FixedStageCSample:
+        target = torch.tensor([[0.5, -0.5, 0.0]])
+        valid_points = torch.tensor([[True, True, True]])
+        ray_tokens = torch.randn(1, 3, 2, 4)
+        return FixedStageCSample(
+            case_path="case.nii.gz",
+            spacing=(1.0, 1.0, 1.0),
+            patch=torch.randn(1, 1, 3, 3, 3),
+            corrupted_sdf=torch.randn(1, 1, 3, 3, 3),
+            recovery_target_volume=torch.randn(1, 1, 3, 3, 3),
+            boundary_points_zyx=torch.randn(1, 3, 3),
+            boundary_normals_zyx=torch.randn(1, 3, 3),
+            valid_boundary_points=valid_points.clone(),
+            ray_points_zyx=torch.randn(1, 3, 2, 3),
+            ray_valid_mask=torch.ones(1, 3, 2, dtype=torch.bool),
+            ray_tokens=ray_tokens,
+            ray_samples={"image": torch.randn(1, 3, 2, 1), "sdf": torch.randn(1, 3, 2, 1)},
+            target_displacement_mm=target,
+            valid_points=valid_points,
+            ray_offsets_mm=torch.tensor([-1.0, 1.0]),
+            choices=torch.zeros(1, 1, 3),
+        )
+
+    def test_fixed_stage_c_sample_payload_roundtrips_and_checks_identity(self):
+        trainer = DHGAStageTrainer.__new__(DHGAStageTrainer)
+        trainer.device = torch.device("cpu")
+        sample = self._make_fixed_stage_c_sample()
+        tmpdir = Path("work") / "unit_fixed_stage_c_sample"
+        tmpdir.mkdir(parents=True, exist_ok=True)
+        path = tmpdir / "fixed_stage_c_sample.pt"
+        try:
+            torch.save(trainer._fixed_sample_payload(sample), path)
+            loaded = trainer._load_fixed_stage_c_sample(path)
+        finally:
+            path.unlink(missing_ok=True)
+        trainer._assert_fixed_sample_matches(loaded, trainer._clone_fixed_sample_tensors(sample))
+        payload_tensors = trainer._fixed_sample_tensors_cpu(sample)
+        payload_tensors["target_displacement_mm"] = payload_tensors["target_displacement_mm"] + 1.0
+        with self.assertRaisesRegex(RuntimeError, "target_displacement_mm"):
+            trainer._assert_fixed_sample_matches_payload(sample, payload_tensors, label="unit test")
+
+    def test_fixed_overfit_checkpoint_restores_model_optimizer_and_sample_identity(self):
+        class FakeStageModel(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.geometry_head = torch.nn.Linear(4, 1)
+                self.frozen = torch.nn.Linear(1, 1)
+
+        trainer = DHGAStageTrainer.__new__(DHGAStageTrainer)
+        trainer.config = DHGAConfig(dhga_stage="C")
+        trainer.device = torch.device("cpu")
+        trainer.model = FakeStageModel()
+        trainer.optimizer = torch.optim.AdamW(trainer.model.geometry_head.parameters(), lr=1e-4)
+        sample = self._make_fixed_stage_c_sample()
+        loss = trainer.model.geometry_head(sample.ray_tokens).sum()
+        loss.backward()
+        trainer.optimizer.step()
+        saved_weight = trainer.model.geometry_head.weight.detach().clone()
+        checkpoint_dir = Path("work") / "unit_fixed_overfit_checkpoint"
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            trainer._write_fixed_overfit_checkpoint(sample, 200, checkpoint_dir, 0.25)
+            with torch.no_grad():
+                trainer.model.geometry_head.weight.add_(10.0)
+            step = trainer._load_fixed_overfit_checkpoint(checkpoint_dir / "step_0200.pt", sample)
+        finally:
+            (checkpoint_dir / "step_0200.pt").unlink(missing_ok=True)
+            (checkpoint_dir / "latest.pt").unlink(missing_ok=True)
+        self.assertEqual(step, 200)
+        self.assertTrue(torch.allclose(trainer.model.geometry_head.weight, saved_weight))
+        self.assertGreater(len(trainer.optimizer.state_dict()["state"]), 0)
 
     def test_text_layer_ensemble_masks_are_pairwise_disjoint(self):
         from dhga.text_layer_ensemble import fuse_text_layer_ensemble

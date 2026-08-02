@@ -55,6 +55,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--stage_c_fixed_overfit_steps", type=int, default=200)
     parser.add_argument("--stage_c_fixed_overfit_log_interval", type=int, default=20)
     parser.add_argument("--stage_c_fixed_overfit_resample_attempts", type=int, default=64)
+    parser.add_argument("--stage_c_fixed_overfit_snapshot_steps", nargs="*", default=["0", "20", "40", "100", "200"])
+    parser.add_argument("--stage_c_fixed_sample_path", default="")
+    parser.add_argument("--stage_c_fixed_overfit_resume_checkpoint", default="")
     parser.add_argument("--evaluate_only", "--evaluation_only", action="store_true", help="Run sliding-window DHGA prediction/evaluation without training")
     parser.add_argument("--predict", "--test", action="store_true", help="Alias for --evaluate_only without training")
     parser.add_argument("--device", default="cuda")
@@ -308,7 +311,10 @@ def main() -> None:
         trainer.fit_stage_c_fixed_corruption_overfit(
             steps=args.stage_c_fixed_overfit_steps,
             log_interval=args.stage_c_fixed_overfit_log_interval,
+            snapshot_steps=tuple(parse_int_list(args.stage_c_fixed_overfit_snapshot_steps, [0, 20, 40, 100, 200])),
             max_resample_attempts=args.stage_c_fixed_overfit_resample_attempts,
+            fixed_sample_path=args.stage_c_fixed_sample_path,
+            resume_checkpoint=args.stage_c_fixed_overfit_resume_checkpoint,
         )
         return
 

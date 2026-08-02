@@ -7,7 +7,7 @@
     <list default="true" id="6fb578aa-0101-4d98-adb8-1c85a67dd3aa" name="Changes" comment="stage C">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/dhga/trainer.py" beforeDir="false" afterPath="$PROJECT_DIR$/dhga/trainer.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/smoke_stage_c.sh" beforeDir="false" afterPath="$PROJECT_DIR$/smoke_stage_c.sh" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/run_3d_dhga.py" beforeDir="false" afterPath="$PROJECT_DIR$/run_3d_dhga.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/tests/test_dhga_static.py" beforeDir="false" afterPath="$PROJECT_DIR$/tests/test_dhga_static.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
@@ -100,7 +100,7 @@
       <updated>1785146243950</updated>
       <workItem from="1785146244991" duration="50389000" />
       <workItem from="1785568881614" duration="319000" />
-      <workItem from="1785569468951" duration="8651000" />
+      <workItem from="1785569468951" duration="19018000" />
     </task>
     <task id="LOCAL-00001" summary="add voxtell_sfda module">
       <option name="closed" value="true" />
@@ -166,7 +166,55 @@
       <option name="project" value="LOCAL" />
       <updated>1785593777336</updated>
     </task>
-    <option name="localTasksCounter" value="9" />
+    <task id="LOCAL-00009" summary="stage C">
+      <option name="closed" value="true" />
+      <created>1785595945618</created>
+      <option name="number" value="00009" />
+      <option name="presentableId" value="LOCAL-00009" />
+      <option name="project" value="LOCAL" />
+      <updated>1785595945618</updated>
+    </task>
+    <task id="LOCAL-00010" summary="stage C">
+      <option name="closed" value="true" />
+      <created>1785596244496</created>
+      <option name="number" value="00010" />
+      <option name="presentableId" value="LOCAL-00010" />
+      <option name="project" value="LOCAL" />
+      <updated>1785596244496</updated>
+    </task>
+    <task id="LOCAL-00011" summary="stage C">
+      <option name="closed" value="true" />
+      <created>1785596400311</created>
+      <option name="number" value="00011" />
+      <option name="presentableId" value="LOCAL-00011" />
+      <option name="project" value="LOCAL" />
+      <updated>1785596400311</updated>
+    </task>
+    <task id="LOCAL-00012" summary="stage C">
+      <option name="closed" value="true" />
+      <created>1785598212071</created>
+      <option name="number" value="00012" />
+      <option name="presentableId" value="LOCAL-00012" />
+      <option name="project" value="LOCAL" />
+      <updated>1785598212071</updated>
+    </task>
+    <task id="LOCAL-00013" summary="stage C">
+      <option name="closed" value="true" />
+      <created>1785599254119</created>
+      <option name="number" value="00013" />
+      <option name="presentableId" value="LOCAL-00013" />
+      <option name="project" value="LOCAL" />
+      <updated>1785599254119</updated>
+    </task>
+    <task id="LOCAL-00014" summary="stage C">
+      <option name="closed" value="true" />
+      <created>1785657116839</created>
+      <option name="number" value="00014" />
+      <option name="presentableId" value="LOCAL-00014" />
+      <option name="project" value="LOCAL" />
+      <updated>1785657116839</updated>
+    </task>
+    <option name="localTasksCounter" value="15" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
