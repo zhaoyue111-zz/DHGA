@@ -20,16 +20,19 @@ class RouterOutput:
     w_geo: Tensor
 
 
-# def _case_rank_normalize(x: Tensor) -> Tensor:
-#     flat = x.flatten(2)
-#     lo = flat.quantile(0.05, dim=-1, keepdim=True)
-#     hi = flat.quantile(0.95, dim=-1, keepdim=True)
-#     y = (flat - lo) / (hi - lo).clamp_min(1e-6)
-#     return y.clamp(0, 1).view_as(x)
-
-# 262,144 个采样点足以稳定估计病例内分位数，
-# 同时避免 torch.quantile 处理超大完整体积。
+# 262,144 sampled points are sufficient for stable per-case quantiles while
+# avoiding torch.quantile on a complete, potentially very large 3-D volume.
 _MAX_QUANTILE_SAMPLES = 262_144
+
+# The router spatial head begins with a 3x3x3 convolution.  Whole-volume
+# evaluation can contain more than one hundred million voxels, so concatenating
+# all six router channels at once may require several GiB.  Training patches
+# (for example 192^3) stay on the original fast path; only larger volumes are
+# evaluated in depth chunks with a one-voxel halo, which preserves the exact
+# receptive field of the spatial head.
+_MAX_FULL_ROUTER_VOXELS = 8_388_608
+_MAX_ROUTER_CHUNK_VOXELS = 2_097_152
+_ROUTER_HALO = 1
 
 
 def _sampled_case_quantile(
@@ -45,7 +48,7 @@ def _sampled_case_quantile(
     if not 0.0 <= q <= 1.0:
         raise ValueError(f"q must be in [0, 1], got {q}")
     if max_samples < 2:
-        raise ValueError( f"max_samples must be at least 2, got {max_samples}")
+        raise ValueError(f"max_samples must be at least 2, got {max_samples}")
 
     flat = x.flatten(2).float()
     num_voxels = flat.shape[-1]
@@ -54,25 +57,35 @@ def _sampled_case_quantile(
         raise ValueError("Cannot calculate a quantile of an empty tensor")
 
     if num_voxels > max_samples:
-        # 全程使用 int64，避免完整体积很大时 float32 linspace
-        # 将 num_voxels - 1 舍入成越界的 num_voxels。
-        positions = torch.arange(max_samples,device=flat.device,dtype=torch.int64,)
-        indices = torch.div(positions * (num_voxels - 1),max_samples - 1,rounding_mode="floor",)
+        # Keep the index calculation in int64. This avoids float32 linspace
+        # rounding the final index to num_voxels on very large volumes.
+        positions = torch.arange(
+            max_samples,
+            device=flat.device,
+            dtype=torch.int64,
+        )
+        indices = torch.div(
+            positions * (num_voxels - 1),
+            max_samples - 1,
+            rounding_mode="floor",
+        )
 
-        # 显式保证首尾索引正确。
         indices[0] = 0
         indices[-1] = num_voxels - 1
 
-        # 提前在这里给出清晰错误，而不是延迟到后续 CUDA 算子。
         index_min = int(indices.min().item())
         index_max = int(indices.max().item())
         if index_min < 0 or index_max >= num_voxels:
-            raise RuntimeError(f"Quantile sampling produced invalid indices: min={index_min}, max={index_max}, num_voxels={num_voxels}, max_samples={max_samples}")
+            raise RuntimeError(
+                "Quantile sampling produced invalid indices: "
+                f"min={index_min}, max={index_max}, "
+                f"num_voxels={num_voxels}, max_samples={max_samples}"
+            )
         sampled = flat.index_select(-1, indices)
     else:
         sampled = flat
 
-    return torch.quantile(sampled, q,dim=-1,keepdim=True,)
+    return torch.quantile(sampled, q, dim=-1, keepdim=True)
 
 
 def _case_rank_normalize(x: Tensor) -> Tensor:
@@ -82,8 +95,8 @@ def _case_rank_normalize(x: Tensor) -> Tensor:
     hi = _sampled_case_quantile(x, 0.95)
 
     normalized = (flat - lo) / (hi - lo).clamp_min(1e-6)
+    return normalized.clamp(0.0, 1.0).view_as(x).to(dtype=x.dtype)
 
-    return (normalized.clamp(0.0, 1.0).view_as(x).to(dtype=x.dtype))
 
 class DisagreementRouter(nn.Module):
     """Continuous router that preserves high-disagreement voxels for geometry."""
@@ -110,6 +123,106 @@ class DisagreementRouter(nn.Module):
         with torch.no_grad():
             self.spatial_head[-1].bias[:] = torch.tensor([0.0, 0.0, -3.0])
 
+    def _spatial_weights(
+        self,
+        sem_prob: Tensor,
+        app_prob: Tensor,
+        disagreement_weight: Tensor,
+        stable_foreground: Tensor,
+        stable_background: Tensor,
+        visual_context: Tensor,
+    ) -> Tensor:
+        """Run the spatial head without materializing a huge six-channel volume.
+
+        For ordinary training patches this uses the original whole-volume path.
+        Large evaluation volumes are split along depth.  A one-voxel halo is
+        included because the only spatially non-pointwise layer is the first
+        3x3x3 convolution; after cropping the halo, chunked output is equivalent
+        to whole-volume output up to normal floating-point kernel variation.
+        """
+        num_voxels = int(sem_prob.shape[-3] * sem_prob.shape[-2] * sem_prob.shape[-1])
+        features = (
+            sem_prob,
+            app_prob,
+            disagreement_weight,
+            stable_foreground,
+            stable_background,
+            visual_context,
+        )
+
+        # Preserve the original autograd path for training. Chunking is an
+        # evaluation-only memory optimization.
+        if num_voxels <= _MAX_FULL_ROUTER_VOXELS or torch.is_grad_enabled():
+            route_features = torch.cat(features, dim=1)
+            return self.spatial_head(route_features).softmax(dim=1)
+
+        batch_size = sem_prob.shape[0]
+        depth, height, width = sem_prob.shape[-3:]
+        plane_voxels = max(int(height * width), 1)
+        core_depth = max(1, _MAX_ROUTER_CHUNK_VOXELS // plane_voxels)
+
+        weights = torch.empty(
+            (batch_size, 3, depth, height, width),
+            device=sem_prob.device,
+            dtype=sem_prob.dtype,
+        )
+
+        for core_start in range(0, depth, core_depth):
+            core_end = min(core_start + core_depth, depth)
+            read_start = max(0, core_start - _ROUTER_HALO)
+            read_end = min(depth, core_end + _ROUTER_HALO)
+
+            route_chunk = torch.cat(
+                tuple(feature[..., read_start:read_end, :, :] for feature in features),
+                dim=1,
+            )
+            chunk_weights = self.spatial_head(route_chunk).softmax(dim=1)
+
+            local_start = core_start - read_start
+            local_end = local_start + (core_end - core_start)
+            weights[..., core_start:core_end, :, :] = chunk_weights[
+                ..., local_start:local_end, :, :
+            ]
+
+            del route_chunk, chunk_weights
+
+        return weights
+
+    @staticmethod
+    def _fuse_probabilities(
+        sem_prob: Tensor,
+        app_prob: Tensor,
+        w_sem: Tensor,
+        w_app: Tensor,
+    ) -> Tensor:
+        """Fuse experts with bounded peak memory during large-volume evaluation."""
+        num_voxels = int(sem_prob.shape[-3] * sem_prob.shape[-2] * sem_prob.shape[-1])
+        if num_voxels <= _MAX_FULL_ROUTER_VOXELS or torch.is_grad_enabled():
+            region_denom = (w_sem + w_app).clamp_min(1e-6)
+            region_w_sem = w_sem / region_denom
+            region_w_app = w_app / region_denom
+            return region_w_sem * sem_prob + region_w_app * app_prob
+
+        depth, height, width = sem_prob.shape[-3:]
+        plane_voxels = max(int(height * width), 1)
+        core_depth = max(1, _MAX_ROUTER_CHUNK_VOXELS // plane_voxels)
+        fused = torch.empty_like(sem_prob)
+
+        for core_start in range(0, depth, core_depth):
+            core_end = min(core_start + core_depth, depth)
+            index = (..., slice(core_start, core_end), slice(None), slice(None))
+            sem_chunk = sem_prob[index]
+            app_chunk = app_prob[index]
+            w_sem_chunk = w_sem[index]
+            w_app_chunk = w_app[index]
+            denom = (w_sem_chunk + w_app_chunk).clamp_min(1e-6)
+            fused[index] = (
+                w_sem_chunk * sem_chunk + w_app_chunk * app_chunk
+            ) / denom
+            del denom
+
+        return fused
+
     def forward(
         self,
         sem_prob: Tensor,
@@ -119,16 +232,21 @@ class DisagreementRouter(nn.Module):
         visual_context: Tensor | None = None,
     ) -> RouterOutput:
         if sem_prob.shape != app_prob.shape:
-            raise ValueError(f"expert probability shapes differ: {sem_prob.shape} vs {app_prob.shape}")
+            raise ValueError(
+                f"expert probability shapes differ: {sem_prob.shape} vs {app_prob.shape}"
+            )
+
         disagreement = (sem_prob - app_prob).abs()
         common_fg = torch.minimum(sem_prob, app_prob)
         common_bg = torch.minimum(1.0 - sem_prob, 1.0 - app_prob)
+
         if sem_stability is not None:
             common_fg = common_fg * sem_stability
             common_bg = common_bg * sem_stability
         if app_stability is not None:
             common_fg = common_fg * app_stability
             common_bg = common_bg * app_stability
+
         if self.normalization == "case_rank":
             stable_foreground = _case_rank_normalize(common_fg)
             stable_background = _case_rank_normalize(common_bg)
@@ -139,32 +257,59 @@ class DisagreementRouter(nn.Module):
             disagreement_weight = disagreement.clamp(0, 1)
         else:
             raise ValueError("normalization must be case_rank or none")
+
+        # The normalized tensors above are the only versions needed below.
+        # Releasing the raw full-volume tensors before the spatial head saves
+        # three complete channels during evaluation.
+        del common_fg, common_bg, disagreement
+
         if visual_context is None:
             visual_context = torch.zeros_like(sem_prob)
         elif visual_context.shape[-3:] != sem_prob.shape[-3:]:
-            visual_context = torch.nn.functional.interpolate(visual_context, size=sem_prob.shape[-3:], mode="trilinear", align_corners=False)
+            visual_context = torch.nn.functional.interpolate(
+                visual_context,
+                size=sem_prob.shape[-3:],
+                mode="trilinear",
+                align_corners=False,
+            )
         if visual_context.shape[1] != 1:
             visual_context = visual_context.mean(dim=1, keepdim=True)
-        route_features = torch.cat([sem_prob, app_prob, disagreement_weight, stable_foreground, stable_background, visual_context], dim=1)
-        weights = self.spatial_head(route_features).softmax(dim=1)
+
+        weights = self._spatial_weights(
+            sem_prob,
+            app_prob,
+            disagreement_weight,
+            stable_foreground,
+            stable_background,
+            visual_context,
+        )
         w_sem = weights[:, 0:1]
         w_app = weights[:, 1:2]
         w_geo = weights[:, 2:3]
-        region_denom = (w_sem + w_app).clamp_min(1e-6)
-        region_w_sem = w_sem / region_denom
-        region_w_app = w_app / region_denom
-        fused = region_w_sem * sem_prob + region_w_app * app_prob
-        # consensus_mask = (stable_foreground > stable_background) & (
-        #     disagreement_weight < disagreement_weight.flatten(2).quantile(self.disagreement_quantile, dim=-1, keepdim=True).view(*disagreement_weight.shape[:2], 1, 1, 1)
-        # )
 
-        disagreement_threshold = _sampled_case_quantile(disagreement_weight,self.disagreement_quantile,).view(
-            disagreement_weight.shape[0],disagreement_weight.shape[1], 1,1,1,).to(dtype=disagreement_weight.dtype)
-        consensus_mask = (stable_foreground > stable_background) & (disagreement_weight < disagreement_threshold)
+        fused = self._fuse_probabilities(sem_prob, app_prob, w_sem, w_app)
+
+        disagreement_threshold = _sampled_case_quantile(
+            disagreement_weight,
+            self.disagreement_quantile,
+        ).view(
+            disagreement_weight.shape[0],
+            disagreement_weight.shape[1],
+            1,
+            1,
+            1,
+        ).to(dtype=disagreement_weight.dtype)
+        consensus_mask = (stable_foreground > stable_background) & (
+            disagreement_weight < disagreement_threshold
+        )
 
         low_disagreement_gate = (0.5 - disagreement_weight).clamp_min(0.0) * 2.0
-        consensus_weight = (stable_foreground + stable_background).clamp(0, 1) * low_disagreement_gate
+        consensus_weight = (
+            (stable_foreground + stable_background).clamp(0, 1)
+            * low_disagreement_gate
+        )
         geometry_weight = (w_geo * disagreement_weight).clamp(0, 1)
+
         return RouterOutput(
             stable_foreground,
             stable_background,
