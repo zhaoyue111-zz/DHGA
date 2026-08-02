@@ -51,6 +51,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--self_check", action="store_true", help="Run synthetic smoke test and config validation")
     parser.add_argument("--dry_run", action="store_true", help="Validate config and print planned modules without training")
     parser.add_argument("--train", action="store_true", help="Launch the selected real DHGA stage trainer")
+    parser.add_argument("--stage_c_fixed_corruption_overfit", action="store_true", help="Run fixed-corruption Stage C overfit diagnostic")
+    parser.add_argument("--stage_c_fixed_overfit_steps", type=int, default=200)
+    parser.add_argument("--stage_c_fixed_overfit_log_interval", type=int, default=20)
+    parser.add_argument("--stage_c_fixed_overfit_resample_attempts", type=int, default=64)
     parser.add_argument("--evaluate_only", "--evaluation_only", action="store_true", help="Run sliding-window DHGA prediction/evaluation without training")
     parser.add_argument("--predict", "--test", action="store_true", help="Alias for --evaluate_only without training")
     parser.add_argument("--device", default="cuda")
@@ -270,6 +274,8 @@ def main() -> None:
     config = config_from_args(args)
     config = inherit_checkpoint_architecture(config)
     config.validate()
+    if args.train and args.stage_c_fixed_corruption_overfit:
+        raise SystemExit("--stage_c_fixed_corruption_overfit is a standalone diagnostic; do not combine it with --train")
     prompts = load_prompts(args.prompts) if args.prompts else []
     save_dir = Path(args.save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
@@ -297,12 +303,21 @@ def main() -> None:
         trainer.fit()
         return
 
+    if args.stage_c_fixed_corruption_overfit:
+        trainer = DHGAStageTrainer(config, prompts, save_dir)
+        trainer.fit_stage_c_fixed_corruption_overfit(
+            steps=args.stage_c_fixed_overfit_steps,
+            log_interval=args.stage_c_fixed_overfit_log_interval,
+            max_resample_attempts=args.stage_c_fixed_overfit_resample_attempts,
+        )
+        return
+
     if args.evaluate_only or args.predict:
         evaluator = DHGAEvaluator(config, prompts, save_dir, args.val_label_dir, args.label_values)
         print(json.dumps(evaluator.evaluate_split("test", args.max_cases), indent=2))
         return
 
-    raise SystemExit("No action selected. Use --self_check, --dry_run, --train, --predict, or --evaluation_only.")
+    raise SystemExit("No action selected. Use --self_check, --dry_run, --train, --stage_c_fixed_corruption_overfit, --predict, or --evaluation_only.")
 
 
 if __name__ == "__main__":

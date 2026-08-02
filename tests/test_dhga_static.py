@@ -21,7 +21,7 @@ from dhga.inference import finalize_mask, finalize_probability, geometry_effecti
 from dhga.losses import balanced_boundary_recovery_loss, cross_supervision_loss, weighted_bce_prob
 from dhga.routing import DisagreementRouter
 from dhga.shared_voxtell import SharedEncoderOnce
-from dhga.trainer import DHGASmokeModel, run_synthetic_smoke, signed_displacement_metrics
+from dhga.trainer import DHGASmokeModel, fixed_overfit_prediction_metrics, run_synthetic_smoke, signed_displacement_metrics
 from dhga.trainer import DHGAStageTrainer
 from dhga.teacher import EMATeacher
 from dhga.text_layer_ensemble import fuse_text_layer_ensemble, summarize_layers, text_layer_training_loss
@@ -264,6 +264,31 @@ class DHGAStaticTests(unittest.TestCase):
         valid = torch.ones_like(target, dtype=torch.bool)
         _loss, parts = balanced_boundary_recovery_loss(pred, target, valid, 0.25, zero_weight=0.25)
         self.assertAlmostEqual(float(parts["sign_agreement"]), 2.0 / 4.0, places=6)
+
+    def test_fixed_overfit_metrics_use_valid_target_groups_and_nonzero_prediction_sign(self):
+        pred = torch.tensor([[0.6, -0.6, -0.6, 0.1, 0.05, 100.0]])
+        target = torch.tensor([[0.5, -0.5, 0.5, -0.5, 0.0, 1.0]])
+        valid = torch.tensor([[True, True, True, True, True, False]])
+        metrics = fixed_overfit_prediction_metrics(pred, target, valid, 0.25)
+        self.assertEqual(metrics["target_positive_count"], 2.0)
+        self.assertEqual(metrics["target_negative_count"], 2.0)
+        self.assertEqual(metrics["target_near_zero_count"], 1.0)
+        self.assertAlmostEqual(metrics["target_positive_ratio"], 2.0 / 5.0, places=6)
+        self.assertAlmostEqual(metrics["target_negative_ratio"], 2.0 / 5.0, places=6)
+        self.assertAlmostEqual(metrics["target_near_zero_ratio"], 1.0 / 5.0, places=6)
+        self.assertAlmostEqual(metrics["pred_target_sign_agreement"], 2.0 / 4.0, places=6)
+        self.assertAlmostEqual(metrics["positive_target_sign_agreement"], 1.0 / 2.0, places=6)
+        self.assertAlmostEqual(metrics["negative_target_sign_agreement"], 1.0 / 2.0, places=6)
+        self.assertAlmostEqual(metrics["zero_target_pred_abs_mean_mm"], 0.05, places=6)
+        self.assertAlmostEqual(metrics["zero_target_mae_mm"], 0.05, places=6)
+
+    def test_fixed_overfit_metrics_zero_when_no_valid_points(self):
+        pred = torch.tensor([[float("nan"), 1.0, -1.0]])
+        target = torch.tensor([[1.0, -1.0, 0.0]])
+        valid = torch.zeros_like(target, dtype=torch.bool)
+        metrics = fixed_overfit_prediction_metrics(pred, target, valid, 0.25)
+        self.assertTrue(all(value == 0.0 for value in metrics.values()))
+        self.assertTrue(all(torch.isfinite(torch.tensor(value)) for value in metrics.values()))
 
     def test_bidirectional_corruption_recovery_sign(self):
         sdf = torch.zeros(8, 1, 7, 7, 7)
@@ -1244,6 +1269,28 @@ class DHGAStaticTests(unittest.TestCase):
         trainable = {name for name, param in trainer.model.named_parameters() if param.requires_grad}
         self.assertIn("router.weight", trainable)
         self.assertIn("appearance_expert.weight", trainable)
+
+    def test_fixed_overfit_trains_only_geometry_head_and_optimizer_matches(self):
+        class FakeStageModel(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.semantic_expert = torch.nn.Linear(1, 1)
+                self.appearance_expert = torch.nn.Linear(1, 1)
+                self.router = torch.nn.Linear(1, 1)
+                self.backbone = torch.nn.Linear(1, 1)
+                self.geometry_head = torch.nn.Linear(1, 1)
+                self.ray_tokens = torch.nn.Linear(1, 1)
+                self.geometry_visual_proj = torch.nn.Conv3d(1, 1, 1)
+
+        trainer = DHGAStageTrainer.__new__(DHGAStageTrainer)
+        trainer.config = DHGAConfig(dhga_stage="C")
+        trainer.model = FakeStageModel()
+        trainer._set_fixed_overfit_trainability()
+        trainer._assert_fixed_overfit_trainability()
+        trainable = {name for name, param in trainer.model.named_parameters() if param.requires_grad}
+        self.assertEqual(trainable, {"geometry_head.weight", "geometry_head.bias"})
+        trainer.optimizer = torch.optim.AdamW([p for p in trainer.model.geometry_head.parameters() if p.requires_grad], lr=1e-4)
+        trainer._assert_fixed_overfit_optimizer()
 
     def test_text_layer_ensemble_masks_are_pairwise_disjoint(self):
         from dhga.text_layer_ensemble import fuse_text_layer_ensemble

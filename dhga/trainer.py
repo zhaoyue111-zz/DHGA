@@ -35,6 +35,26 @@ class DHGASmokeResult:
     shared_encoder_calls: int
 
 
+@dataclass
+class FixedStageCSample:
+    case_path: str
+    spacing: tuple[float, float, float]
+    patch: Tensor
+    corrupted_sdf: Tensor
+    recovery_target_volume: Tensor
+    boundary_points_zyx: Tensor
+    boundary_normals_zyx: Tensor
+    valid_boundary_points: Tensor
+    ray_points_zyx: Tensor
+    ray_valid_mask: Tensor
+    ray_tokens: Tensor
+    ray_samples: dict[str, Tensor]
+    target_displacement_mm: Tensor
+    valid_points: Tensor
+    ray_offsets_mm: Tensor
+    choices: Tensor
+
+
 def signed_displacement_metrics(displacement_mm: Tensor, valid: Tensor, near_zero_threshold_mm: float, prefix: str) -> dict[str, float]:
     valid_mask = valid.detach().bool()
     values = displacement_mm.detach().float()
@@ -61,6 +81,66 @@ def signed_displacement_metrics(displacement_mm: Tensor, valid: Tensor, near_zer
         f"{prefix}_near_zero_displacement_ratio": float(near_zero.float().mean().cpu()),
         f"{prefix}_nonzero_displacement_ratio": float((~near_zero).float().mean().cpu()),
     }
+
+
+def target_group_masks(target_mm: Tensor, valid: Tensor, near_zero_threshold_mm: float) -> tuple[Tensor, Tensor, Tensor]:
+    valid_mask = valid.detach().bool()
+    threshold = max(1e-4, float(near_zero_threshold_mm))
+    positive = valid_mask & (target_mm.detach() > threshold)
+    negative = valid_mask & (target_mm.detach() < -threshold)
+    zero = valid_mask & (target_mm.detach().abs() <= threshold)
+    return positive, negative, zero
+
+
+def fixed_overfit_prediction_metrics(prediction_mm: Tensor, target_mm: Tensor, valid: Tensor, near_zero_threshold_mm: float) -> dict[str, float]:
+    threshold = max(1e-4, float(near_zero_threshold_mm))
+    valid_mask = valid.detach().bool()
+    pred = prediction_mm.detach().float()
+    target = target_mm.detach().float()
+    valid_count = float(valid_mask.float().sum().cpu())
+    positive_target, negative_target, zero_target = target_group_masks(target, valid_mask, threshold)
+    pred_valid = pred[valid_mask] if bool(valid_mask.any().cpu()) else pred.new_empty((0,))
+    pred_near_zero = pred_valid.abs() <= threshold
+    nonzero_target = positive_target | negative_target
+    sign_correct = nonzero_target & (pred.abs() > threshold) & (torch.sign(pred) == torch.sign(target))
+
+    def count(mask: Tensor) -> float:
+        return float(mask.float().sum().cpu())
+
+    def ratio(mask: Tensor) -> float:
+        return count(mask) / max(valid_count, 1.0)
+
+    def subset_sign(mask: Tensor, expected_sign: int) -> float:
+        denom = count(mask)
+        if denom <= 0:
+            return 0.0
+        correct = mask & (pred.abs() > threshold) & ((pred > 0) if expected_sign > 0 else (pred < 0))
+        return count(correct) / denom
+
+    metrics = {
+        "target_positive_count": count(positive_target),
+        "target_negative_count": count(negative_target),
+        "target_near_zero_count": count(zero_target),
+        "target_positive_ratio": ratio(positive_target),
+        "target_negative_ratio": ratio(negative_target),
+        "target_near_zero_ratio": ratio(zero_target),
+        "pred_abs_displacement_mm": float(pred_valid.abs().mean().cpu()) if pred_valid.numel() else 0.0,
+        "pred_positive_displacement_ratio": float((pred_valid > threshold).float().mean().cpu()) if pred_valid.numel() else 0.0,
+        "pred_negative_displacement_ratio": float((pred_valid < -threshold).float().mean().cpu()) if pred_valid.numel() else 0.0,
+        "pred_near_zero_displacement_ratio": float(pred_near_zero.float().mean().cpu()) if pred_valid.numel() else 0.0,
+        "pred_target_sign_agreement": count(sign_correct) / max(count(nonzero_target), 1.0),
+    }
+    for name, mask, expected_sign in (("positive_target", positive_target, 1), ("negative_target", negative_target, -1)):
+        pred_subset = pred[mask]
+        target_subset = target[mask]
+        metrics[f"{name}_pred_mean_mm"] = float(pred_subset.mean().cpu()) if pred_subset.numel() else 0.0
+        metrics[f"{name}_sign_agreement"] = subset_sign(mask, expected_sign)
+        metrics[f"{name}_mae_mm"] = float((pred_subset - target_subset).abs().mean().cpu()) if pred_subset.numel() else 0.0
+    zero_pred = pred[zero_target]
+    zero_tgt = target[zero_target]
+    metrics["zero_target_pred_abs_mean_mm"] = float(zero_pred.abs().mean().cpu()) if zero_pred.numel() else 0.0
+    metrics["zero_target_mae_mm"] = float((zero_pred - zero_tgt).abs().mean().cpu()) if zero_pred.numel() else 0.0
+    return metrics
 
 
 class TinySegDecoder(nn.Module):
@@ -1022,6 +1102,368 @@ class DHGAStageTrainer:
 
     def _combine_stage_c_loss(self, recovery: Tensor, minimal: Tensor) -> Tensor:
         return self.config.dhga_boundary_recovery_weight * recovery + self.config.dhga_minimal_transport_weight * minimal
+
+    def fit_stage_c_fixed_corruption_overfit(
+        self,
+        steps: int = 200,
+        log_interval: int = 20,
+        snapshot_steps: tuple[int, ...] = (0, 20, 40, 100, 200),
+        max_resample_attempts: int = 64,
+    ) -> None:
+        if self.config.dhga_stage != "C":
+            raise RuntimeError("fixed corruption overfit diagnostic requires Stage C")
+        self._set_fixed_overfit_trainability()
+        sample = self._build_fixed_stage_c_sample(max_resample_attempts)
+        self._assert_fixed_sample_has_all_target_groups(sample)
+        self._assert_fixed_sample_stable(sample)
+        self._assert_fixed_overfit_trainability()
+        self.optimizer = torch.optim.AdamW(
+            [p for p in self.model.geometry_head.parameters() if p.requires_grad],
+            lr=self.config.lr,
+            weight_decay=self.config.weight_decay,
+            foreach=False,
+        )
+        self._assert_fixed_overfit_optimizer()
+        self.scaler = torch.amp.GradScaler("cuda", enabled=False)
+        out_dir = self.save_dir
+        snapshot_dir = out_dir / "fixed_overfit_snapshots"
+        snapshot_dir.mkdir(parents=True, exist_ok=True)
+        torch.save(self._fixed_sample_payload(sample), out_dir / "fixed_stage_c_sample.pt")
+        reference = self._clone_fixed_sample_tensors(sample)
+        near_zero_threshold = max(1e-4, 0.25 * float(self.config.dhga_ray_step_mm))
+        self._assert_fixed_prediction_connects_to_geometry_head(sample, near_zero_threshold)
+        history: list[dict[str, float]] = []
+        self._write_fixed_overfit_snapshot(sample, 0, snapshot_dir, near_zero_threshold)
+        history.append(self._fixed_overfit_eval_record(sample, 0, near_zero_threshold, {}))
+        for step in range(1, int(steps) + 1):
+            self._assert_fixed_sample_matches(sample, reference)
+            self.model.train()
+            pred = self._fixed_geometry_prediction(sample)
+            recovery, parts = balanced_boundary_recovery_loss(
+                pred,
+                sample.target_displacement_mm,
+                sample.valid_points,
+                near_zero_threshold,
+                self.config.dhga_boundary_recovery_zero_weight,
+            )
+            minimal = minimal_transport_loss(pred, sample.valid_points.float())
+            loss = self._combine_stage_c_loss(recovery, minimal)
+            self.optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            grad_metrics = self._fixed_geometry_grad_metrics()
+            torch.nn.utils.clip_grad_norm_([p for p in self.model.geometry_head.parameters() if p.requires_grad], 1.0)
+            self.optimizer.step()
+            if step % int(log_interval) == 0 or step in snapshot_steps:
+                record = self._fixed_overfit_eval_record(sample, step, near_zero_threshold, grad_metrics)
+                history.append(record)
+                print(json.dumps(record, sort_keys=True))
+            if step in snapshot_steps:
+                self._write_fixed_overfit_snapshot(sample, step, snapshot_dir, near_zero_threshold)
+        self._assert_fixed_sample_matches(sample, reference)
+        (out_dir / "fixed_overfit_history.json").write_text(json.dumps(history, indent=2))
+
+    def _set_fixed_overfit_trainability(self) -> None:
+        for param in self.model.parameters():
+            param.requires_grad_(False)
+        for param in self.model.geometry_head.parameters():
+            param.requires_grad_(True)
+
+    def _assert_fixed_overfit_trainability(self) -> None:
+        trainable = {name for name, param in self.model.named_parameters() if param.requires_grad}
+        expected = {f"geometry_head.{name}" for name, _ in self.model.geometry_head.named_parameters()}
+        if trainable != expected:
+            raise RuntimeError(f"Fixed overfit must train only geometry_head parameters, got {sorted(trainable)}")
+
+    def _assert_fixed_overfit_optimizer(self) -> None:
+        optimizer_ids = {id(param) for group in self.optimizer.param_groups for param in group["params"]}
+        expected_ids = {id(param) for param in self.model.geometry_head.parameters() if param.requires_grad}
+        if optimizer_ids != expected_ids:
+            raise RuntimeError("Fixed overfit optimizer must contain only geometry_head parameters")
+
+    def _build_fixed_stage_c_sample(self, max_resample_attempts: int) -> FixedStageCSample:
+        torch.manual_seed(int(self.config.seed))
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(int(self.config.seed))
+        random.seed(int(self.config.seed))
+        train_paths = self._load_train_paths()
+        if not train_paths:
+            raise RuntimeError("Fixed Stage C overfit diagnostic requires at least one training case")
+        path = train_paths[0]
+        volume, spacing = self._load_volume(path)
+        slicers = self.predictor._internal_get_sliding_window_slicers(volume.shape[1:])
+        if not slicers:
+            raise RuntimeError(f"No sliding-window slicers available for {path}")
+        random.Random(int(self.config.seed)).shuffle(slicers)
+        slicers = self._teacher_boundary_guided_slicers(volume, spacing, slicers)
+        patch = torch.clone(volume[slicers[0]][None], memory_format=torch.contiguous_format).to(self.device)
+        with torch.no_grad():
+            teacher_out = self._teacher_forward(patch.float(), spacing, run_geometry=False)
+            was_training = self.model.training
+            self.model.eval()
+            student_out = self.model(patch.float(), spacing, run_geometry=False)
+            self.model.train(was_training)
+            teacher_sdf = mask_to_sdf(teacher_out.router.fused_prob.detach() >= self.config.pred_threshold, spacing)
+            boundary_band = teacher_sdf.abs() <= self.config.dhga_surface_tolerance_mm * 3.0
+            if teacher_out.layer_ensemble is not None and teacher_out.layer_ensemble.get("candidate_fg") is not None:
+                candidate = teacher_out.layer_ensemble["candidate_fg"].detach()
+                if candidate.shape[-3:] != boundary_band.shape[-3:]:
+                    candidate = F.interpolate(candidate.float(), size=boundary_band.shape[-3:], mode="trilinear", align_corners=False)
+                stable_band = boundary_band.to(dtype=candidate.dtype) * (candidate > 0.5)
+            else:
+                stable_band = boundary_band * (teacher_out.router.cross_supervision_weight.detach() > 0)
+            for attempt in range(int(max_resample_attempts)):
+                torch.manual_seed(int(self.config.seed) + attempt)
+                if torch.cuda.is_available():
+                    torch.cuda.manual_seed_all(int(self.config.seed) + attempt)
+                corrupted_sdf, recovery_target, choices = make_local_boundary_corruption(
+                    teacher_sdf,
+                    self.config.dhga_corruption_max_offset_mm,
+                    self.config.dhga_corruption_modes,
+                    stable_band=stable_band,
+                )
+                sample = self._fixed_sample_from_corruption(path, patch, spacing, student_out, corrupted_sdf, recovery_target, choices)
+                positive, negative, zero = target_group_masks(
+                    sample.target_displacement_mm,
+                    sample.valid_points,
+                    0.25 * float(self.config.dhga_ray_step_mm),
+                )
+                if bool(positive.any().cpu()) and bool(negative.any().cpu()) and bool(zero.any().cpu()):
+                    return sample
+        raise RuntimeError(
+            f"Could not sample fixed Stage C target with positive, negative, and near-zero groups after {max_resample_attempts} attempts"
+        )
+
+    def _fixed_sample_from_corruption(
+        self,
+        path: Path,
+        patch: Tensor,
+        spacing: tuple[float, float, float],
+        student_out,
+        corrupted_sdf: Tensor,
+        recovery_target: Tensor,
+        choices: Tensor,
+    ) -> FixedStageCSample:
+        router = student_out.router
+        sampling_weight = router.geometry_disagreement_weight
+        candidate_score = student_out.layer_ensemble.get("candidate_score").detach() if student_out.layer_ensemble else None
+        if candidate_score is not None:
+            if candidate_score.shape[-3:] != sampling_weight.shape[-3:]:
+                candidate_score = F.interpolate(candidate_score.float(), size=sampling_weight.shape[-3:], mode="trilinear", align_corners=False)
+            sampling_weight = torch.maximum(sampling_weight, candidate_score.to(device=sampling_weight.device, dtype=sampling_weight.dtype).clamp(0, 1))
+        points, normals, valid_points = extract_boundary_points(
+            corrupted_sdf,
+            self.config.dhga_surface_tolerance_mm,
+            self.config.dhga_max_boundary_points,
+            spacing,
+            sampling_weight=sampling_weight,
+        )
+        offsets = self.model.ray_offsets_mm.to(patch.device)
+        sampled_image, valid_ray = sample_along_normals(patch[:, :1], points, normals, offsets, spacing)
+        sampled_sem, valid_sem = sample_along_normals(student_out.semantic_prob, points, normals, offsets, spacing)
+        sampled_app, valid_app = sample_along_normals(student_out.appearance_prob, points, normals, offsets, spacing)
+        sampled_dis, valid_dis = sample_along_normals(router.disagreement, points, normals, offsets, spacing)
+        sampled_fused, valid_fused = sample_along_normals(router.fused_prob, points, normals, offsets, spacing)
+        sampled_geo_gate, valid_geo_gate = sample_along_normals(router.w_geo, points, normals, offsets, spacing)
+        sampled_sdf, valid_sdf = sample_along_normals(corrupted_sdf, points, normals, offsets, spacing)
+        visual_feature = self.model.geometry_visual_proj(student_out.features.encoder_stages[self.model.geometry_feature_idx])
+        sampled_visual, valid_visual = self.model._sample_visual_feature(visual_feature, points, normals, offsets, spacing, tuple(patch.shape[-3:]))
+        ray_valid = valid_ray & valid_sem & valid_app & valid_dis & valid_fused & valid_geo_gate & valid_sdf & valid_visual & valid_points.unsqueeze(-1)
+        tokens = self.model.ray_tokens(
+            sampled_image,
+            sampled_sem,
+            sampled_app,
+            sampled_dis,
+            sampled_fused,
+            sampled_geo_gate,
+            sampled_sdf,
+            sampled_visual,
+            offsets,
+            self.model.text_embeddings,
+        )
+        sampled_target, valid_target = sample_along_normals(recovery_target, points, normals, torch.zeros(1, device=patch.device), spacing)
+        target = sampled_target[:, :, 0, 0]
+        point_valid = valid_target[:, :, 0] & valid_points & ray_valid.any(dim=-1)
+        spacing_tensor = torch.tensor(spacing, device=points.device, dtype=points.dtype)
+        ray_points = points.unsqueeze(2) + normals.unsqueeze(2) * (offsets.view(1, 1, -1, 1) / spacing_tensor.view(1, 1, 1, 3))
+        ray_samples = {
+            "image": sampled_image.detach().clone(),
+            "semantic": sampled_sem.detach().clone(),
+            "appearance": sampled_app.detach().clone(),
+            "disagreement": sampled_dis.detach().clone(),
+            "fused": sampled_fused.detach().clone(),
+            "geometry_gate": sampled_geo_gate.detach().clone(),
+            "sdf": sampled_sdf.detach().clone(),
+            "visual": sampled_visual.detach().clone(),
+        }
+        return FixedStageCSample(
+            case_path=str(path),
+            spacing=tuple(float(v) for v in spacing),
+            patch=patch.detach().clone(),
+            corrupted_sdf=corrupted_sdf.detach().clone(),
+            recovery_target_volume=recovery_target.detach().clone(),
+            boundary_points_zyx=points.detach().clone(),
+            boundary_normals_zyx=normals.detach().clone(),
+            valid_boundary_points=valid_points.detach().clone(),
+            ray_points_zyx=ray_points.detach().clone(),
+            ray_valid_mask=ray_valid.detach().clone(),
+            ray_tokens=tokens.detach().clone(),
+            ray_samples=ray_samples,
+            target_displacement_mm=target.detach().clone(),
+            valid_points=point_valid.detach().clone(),
+            ray_offsets_mm=offsets.detach().clone(),
+            choices=choices.detach().clone(),
+        )
+
+    def _fixed_geometry_prediction(self, sample: FixedStageCSample) -> Tensor:
+        pred = self.model.geometry_head(sample.ray_tokens, sample.ray_valid_mask)
+        return pred["expected_displacement_mm"].clamp(
+            -float(self.config.dhga_geometry_max_displacement_mm),
+            float(self.config.dhga_geometry_max_displacement_mm),
+        )
+
+    def _fixed_overfit_eval_record(
+        self,
+        sample: FixedStageCSample,
+        step: int,
+        near_zero_threshold: float,
+        grad_metrics: dict[str, float],
+    ) -> dict[str, float]:
+        self.model.eval()
+        with torch.no_grad():
+            pred = self._fixed_geometry_prediction(sample)
+            recovery, parts = balanced_boundary_recovery_loss(
+                pred,
+                sample.target_displacement_mm,
+                sample.valid_points,
+                near_zero_threshold,
+                self.config.dhga_boundary_recovery_zero_weight,
+            )
+            minimal = minimal_transport_loss(pred, sample.valid_points.float())
+            total = self._combine_stage_c_loss(recovery, minimal)
+        record = {
+            "step": float(step),
+            "loss": float(total.detach().cpu()),
+            "dhga_boundary_recovery_loss": float(recovery.detach().cpu()),
+            "dhga_boundary_recovery_nonzero_loss": float(parts["nonzero_loss"].cpu()),
+            "dhga_boundary_recovery_zero_loss": float(parts["zero_loss"].cpu()),
+            "dhga_boundary_recovery_nonzero_count": float(parts["nonzero_count"].cpu()),
+            "dhga_boundary_recovery_zero_count": float(parts["zero_count"].cpu()),
+        }
+        record.update(fixed_overfit_prediction_metrics(pred, sample.target_displacement_mm, sample.valid_points, near_zero_threshold))
+        record.update(grad_metrics)
+        return record
+
+    def _fixed_geometry_grad_metrics(self) -> dict[str, float]:
+        total_sq = 0.0
+        nonzero = 0
+        tensors = 0
+        for param in self.model.geometry_head.parameters():
+            if param.grad is None:
+                continue
+            grad = param.grad.detach().float()
+            tensors += 1
+            total_sq += float(grad.norm().cpu()) ** 2
+            if bool((grad.abs() > 0).any().cpu()):
+                nonzero += 1
+        return {
+            "dhga_fixed_geometry_grad_norm": total_sq ** 0.5,
+            "dhga_fixed_geometry_grad_nonzero_tensors": float(nonzero),
+            "dhga_fixed_geometry_grad_tensors": float(tensors),
+        }
+
+    def _write_fixed_overfit_snapshot(self, sample: FixedStageCSample, step: int, snapshot_dir: Path, near_zero_threshold: float) -> None:
+        self.model.eval()
+        with torch.no_grad():
+            pred = self._fixed_geometry_prediction(sample)
+        torch.save(
+            {
+                "step": int(step),
+                "near_zero_threshold_mm": float(near_zero_threshold),
+                "target_displacement_mm": sample.target_displacement_mm.detach().cpu(),
+                "prediction_displacement_mm": pred.detach().cpu(),
+                "valid_points": sample.valid_points.detach().cpu(),
+                "boundary_points_zyx": sample.boundary_points_zyx.detach().cpu(),
+                "ray_points_zyx": sample.ray_points_zyx.detach().cpu(),
+                "ray_valid_mask": sample.ray_valid_mask.detach().cpu(),
+            },
+            snapshot_dir / f"step_{int(step):04d}.pt",
+        )
+
+    def _fixed_sample_payload(self, sample: FixedStageCSample) -> dict[str, object]:
+        return {
+            "case_path": sample.case_path,
+            "spacing": sample.spacing,
+            "patch": sample.patch.detach().cpu(),
+            "corrupted_sdf": sample.corrupted_sdf.detach().cpu(),
+            "recovery_target_volume": sample.recovery_target_volume.detach().cpu(),
+            "boundary_points_zyx": sample.boundary_points_zyx.detach().cpu(),
+            "boundary_normals_zyx": sample.boundary_normals_zyx.detach().cpu(),
+            "valid_boundary_points": sample.valid_boundary_points.detach().cpu(),
+            "ray_points_zyx": sample.ray_points_zyx.detach().cpu(),
+            "ray_valid_mask": sample.ray_valid_mask.detach().cpu(),
+            "ray_tokens": sample.ray_tokens.detach().cpu(),
+            "ray_samples": {name: tensor.detach().cpu() for name, tensor in sample.ray_samples.items()},
+            "target_displacement_mm": sample.target_displacement_mm.detach().cpu(),
+            "valid_points": sample.valid_points.detach().cpu(),
+            "ray_offsets_mm": sample.ray_offsets_mm.detach().cpu(),
+            "choices": sample.choices.detach().cpu(),
+        }
+
+    def _clone_fixed_sample_tensors(self, sample: FixedStageCSample) -> dict[str, Tensor]:
+        return {
+            "corrupted_sdf": sample.corrupted_sdf.detach().clone(),
+            "boundary_points_zyx": sample.boundary_points_zyx.detach().clone(),
+            "boundary_normals_zyx": sample.boundary_normals_zyx.detach().clone(),
+            "ray_points_zyx": sample.ray_points_zyx.detach().clone(),
+            "ray_tokens": sample.ray_tokens.detach().clone(),
+            "ray_valid_mask": sample.ray_valid_mask.detach().clone(),
+            "valid_points": sample.valid_points.detach().clone(),
+            "target_displacement_mm": sample.target_displacement_mm.detach().clone(),
+            **{f"ray_samples.{name}": tensor.detach().clone() for name, tensor in sample.ray_samples.items()},
+        }
+
+    def _assert_fixed_sample_stable(self, sample: FixedStageCSample) -> None:
+        first = self._clone_fixed_sample_tensors(sample)
+        second = self._clone_fixed_sample_tensors(sample)
+        self._assert_fixed_sample_matches(sample, first)
+        for key, value in second.items():
+            if not torch.equal(value, first[key]):
+                raise RuntimeError(f"Fixed sample cache read is not stable for {key}")
+
+    def _assert_fixed_sample_matches(self, sample: FixedStageCSample, reference: dict[str, Tensor]) -> None:
+        current = self._clone_fixed_sample_tensors(sample)
+        for key, value in reference.items():
+            if not torch.equal(current[key], value):
+                raise RuntimeError(f"Fixed Stage C sample tensor changed during training: {key}")
+
+    def _assert_fixed_sample_has_all_target_groups(self, sample: FixedStageCSample) -> None:
+        positive, negative, zero = target_group_masks(sample.target_displacement_mm, sample.valid_points, 0.25 * float(self.config.dhga_ray_step_mm))
+        if not (bool(positive.any().cpu()) and bool(negative.any().cpu()) and bool(zero.any().cpu())):
+            raise RuntimeError("Fixed Stage C sample must contain positive, negative, and near-zero targets")
+        if sample.target_displacement_mm.shape != sample.valid_points.shape:
+            raise RuntimeError("Fixed Stage C target and valid mask shapes do not match")
+        if sample.ray_tokens.shape[:3] != sample.ray_valid_mask.shape:
+            raise RuntimeError("Fixed Stage C ray tokens and valid ray mask shapes do not align")
+
+    def _assert_fixed_prediction_connects_to_geometry_head(self, sample: FixedStageCSample, near_zero_threshold: float) -> None:
+        self.optimizer = torch.optim.AdamW([p for p in self.model.geometry_head.parameters() if p.requires_grad], lr=self.config.lr, weight_decay=self.config.weight_decay, foreach=False)
+        self.optimizer.zero_grad(set_to_none=True)
+        pred = self._fixed_geometry_prediction(sample)
+        if pred.shape != sample.target_displacement_mm.shape:
+            raise RuntimeError("Fixed Stage C prediction and target shapes do not match")
+        recovery, _ = balanced_boundary_recovery_loss(
+            pred,
+            sample.target_displacement_mm,
+            sample.valid_points,
+            near_zero_threshold,
+            self.config.dhga_boundary_recovery_zero_weight,
+        )
+        if not recovery.requires_grad:
+            raise RuntimeError("Fixed Stage C recovery loss is detached from geometry_head")
+        recovery.backward()
+        if self._fixed_geometry_grad_metrics()["dhga_fixed_geometry_grad_tensors"] <= 0:
+            raise RuntimeError("Fixed Stage C cached sample does not backpropagate to geometry_head")
+        self.optimizer.zero_grad(set_to_none=True)
 
     def _stage_d(self, patch: Tensor, spacing: tuple[float, float, float]) -> tuple[Tensor, dict[str, float]]:
         teacher_out = self._teacher_forward(patch, spacing, run_geometry=False)
