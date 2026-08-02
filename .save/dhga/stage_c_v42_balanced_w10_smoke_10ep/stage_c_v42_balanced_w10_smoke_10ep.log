@@ -1,0 +1,242 @@
+Loading checkpoint shards:   0%|          | 0/2 [00:00<?, ?it/s]Loading checkpoint shards:  50%|█████     | 1/2 [00:04<00:04,  5.00s/it]Loading checkpoint shards: 100%|██████████| 2/2 [00:08<00:00,  3.97s/it]Loading checkpoint shards: 100%|██████████| 2/2 [00:08<00:00,  4.12s/it]
+Stage C init kept fresh geometry modules; skipped checkpoint keys with prefixes ('geometry_head.', 'ray_tokens.', 'geometry_visual_proj.') (13 tensors).
+{
+  "dhga.semantic_lora": {
+    "trainable_params": 0,
+    "trainable_names": [],
+    "num_trainable_names": 0
+  },
+  "dhga.appearance_expert": {
+    "trainable_params": 0,
+    "trainable_names": [],
+    "num_trainable_names": 0
+  },
+  "dhga.router": {
+    "trainable_params": 0,
+    "trainable_names": [],
+    "num_trainable_names": 0
+  },
+  "dhga.geometry_head": {
+    "trainable_params": 6242,
+    "trainable_names": [
+      "dhga.geometry_head.center_bias",
+      "dhga.geometry_head.net.0.weight",
+      "dhga.geometry_head.net.0.bias",
+      "dhga.geometry_head.net.2.weight",
+      "dhga.geometry_head.net.2.bias",
+      "dhga.geometry_head.net.4.weight",
+      "dhga.geometry_head.net.4.bias"
+    ],
+    "num_trainable_names": 7
+  },
+  "dhga.ray_tokens": {
+    "trainable_params": 40976,
+    "trainable_names": [
+      "dhga.ray_tokens.prompt_proj.weight",
+      "dhga.ray_tokens.prompt_proj.bias"
+    ],
+    "num_trainable_names": 2
+  },
+  "total_trainable_params": 47218,
+  "all_trainable_names": [
+    "dhga.geometry_head.center_bias",
+    "dhga.geometry_head.net.0.weight",
+    "dhga.geometry_head.net.0.bias",
+    "dhga.geometry_head.net.2.weight",
+    "dhga.geometry_head.net.2.bias",
+    "dhga.geometry_head.net.4.weight",
+    "dhga.geometry_head.net.4.bias",
+    "dhga.ray_tokens.prompt_proj.weight",
+    "dhga.ray_tokens.prompt_proj.bias"
+  ]
+}
+{
+  "stage_C.semantic_lora": {
+    "trainable_params": 0,
+    "trainable_tensors": 0,
+    "sample_names": []
+  },
+  "stage_C.appearance_expert": {
+    "trainable_params": 0,
+    "trainable_tensors": 0,
+    "sample_names": []
+  },
+  "stage_C.router": {
+    "trainable_params": 0,
+    "trainable_tensors": 0,
+    "sample_names": []
+  },
+  "stage_C.geometry": {
+    "trainable_params": 49786,
+    "trainable_tensors": 11,
+    "sample_names": [
+      "ray_tokens.prompt_proj.weight",
+      "ray_tokens.prompt_proj.bias",
+      "geometry_visual_proj.weight",
+      "geometry_visual_proj.bias",
+      "geometry_head.center_bias",
+      "geometry_head.net.0.weight",
+      "geometry_head.net.0.bias",
+      "geometry_head.net.2.weight",
+      "geometry_head.net.2.bias",
+      "geometry_head.net.4.weight",
+      "geometry_head.net.4.bias"
+    ]
+  },
+  "stage_C.other": {
+    "trainable_params": 0,
+    "trainable_tensors": 0,
+    "sample_names": []
+  }
+}
+DHGA Stage C:   0%|          | 0/10 [00:00<?, ?it/s]
+epoch 1/10:   0%|          | 0/4 [00:00<?, ?it/s][A
+epoch 1/10:   0%|          | 0/4 [00:26<?, ?it/s, loss=2.7805, kind=default, case=HCC_10140276_20170][A
+epoch 1/10:  25%|██▌       | 1/4 [00:26<01:19, 26.60s/it, loss=2.7805, kind=default, case=HCC_10140276_20170][A
+epoch 1/10:  25%|██▌       | 1/4 [00:29<01:19, 26.60s/it, loss=1.2679, kind=default, case=HCC_10140276_20170][A
+epoch 1/10:  50%|█████     | 2/4 [00:29<00:24, 12.43s/it, loss=1.2679, kind=default, case=HCC_10140276_20170][A
+epoch 1/10:  50%|█████     | 2/4 [00:49<00:24, 12.43s/it, loss=1.6728, kind=default, case=HEM_PA99.nii.gz]   [A
+epoch 1/10:  75%|███████▌  | 3/4 [00:49<00:15, 15.90s/it, loss=1.6728, kind=default, case=HEM_PA99.nii.gz][A
+epoch 1/10:  75%|███████▌  | 3/4 [00:51<00:15, 15.90s/it, loss=1.4875, kind=default, case=HEM_PA99.nii.gz][A
+epoch 1/10: 100%|██████████| 4/4 [00:51<00:00, 10.59s/it, loss=1.4875, kind=default, case=HEM_PA99.nii.gz][A
+                                                                                                          [ADHGA Stage C:  10%|█         | 1/10 [00:51<07:47, 51.98s/it]
+epoch 2/10:   0%|          | 0/4 [00:00<?, ?it/s][A
+epoch 2/10:   0%|          | 0/4 [00:20<?, ?it/s, loss=1.0244, kind=default, case=HEM_PA99.nii.gz][A
+epoch 2/10:  25%|██▌       | 1/4 [00:20<01:00, 20.22s/it, loss=1.0244, kind=default, case=HEM_PA99.nii.gz][A
+epoch 2/10:  25%|██▌       | 1/4 [00:22<01:00, 20.22s/it, loss=1.1815, kind=default, case=HEM_PA99.nii.gz][A
+epoch 2/10:  50%|█████     | 2/4 [00:22<00:19,  9.85s/it, loss=1.1815, kind=default, case=HEM_PA99.nii.gz][A
+epoch 2/10:  50%|█████     | 2/4 [00:42<00:19,  9.85s/it, loss=1.8688, kind=default, case=HCC_10140276_20170][A
+epoch 2/10:  75%|███████▌  | 3/4 [00:42<00:14, 14.39s/it, loss=1.8688, kind=default, case=HCC_10140276_20170][A
+epoch 2/10:  75%|███████▌  | 3/4 [00:45<00:14, 14.39s/it, loss=1.9816, kind=default, case=HCC_10140276_20170][A
+epoch 2/10: 100%|██████████| 4/4 [00:45<00:00,  9.66s/it, loss=1.9816, kind=default, case=HCC_10140276_20170][A
+                                                                                                             [A
+DHGA evaluation-only:   0%|          | 0/8 [00:00<?, ?it/s][A
+DHGA evaluation-only:  12%|█▎        | 1/8 [01:09<08:09, 69.89s/it][A
+DHGA evaluation-only:  25%|██▌       | 2/8 [02:38<08:05, 80.93s/it][A
+DHGA evaluation-only:  38%|███▊      | 3/8 [03:20<05:16, 63.26s/it][A
+DHGA evaluation-only:  50%|█████     | 4/8 [04:27<04:18, 64.67s/it][A
+DHGA evaluation-only:  62%|██████▎   | 5/8 [06:52<04:41, 93.70s/it][A
+DHGA evaluation-only:  75%|███████▌  | 6/8 [07:36<02:33, 76.82s/it][A
+DHGA evaluation-only:  88%|████████▊ | 7/8 [08:56<01:17, 77.66s/it][A
+DHGA evaluation-only: 100%|██████████| 8/8 [09:13<00:00, 58.56s/it][ADHGA evaluation-only: 100%|██████████| 8/8 [09:13<00:00, 69.24s/it]
+DHGA Stage C:  20%|██        | 2/10 [10:51<49:54, 374.28s/it]
+epoch 3/10:   0%|          | 0/4 [00:00<?, ?it/s][A
+epoch 3/10:   0%|          | 0/4 [00:19<?, ?it/s, loss=2.8521, kind=default, case=HCC_10140276_20170][A
+epoch 3/10:  25%|██▌       | 1/4 [00:19<00:58, 19.40s/it, loss=2.8521, kind=default, case=HCC_10140276_20170][A
+epoch 3/10:  25%|██▌       | 1/4 [00:21<00:58, 19.40s/it, loss=2.6969, kind=default, case=HCC_10140276_20170][A
+epoch 3/10:  50%|█████     | 2/4 [00:21<00:18,  9.41s/it, loss=2.6969, kind=default, case=HCC_10140276_20170][A
+epoch 3/10:  50%|█████     | 2/4 [00:41<00:18,  9.41s/it, loss=2.2204, kind=default, case=HEM_PA99.nii.gz]   [A
+epoch 3/10:  75%|███████▌  | 3/4 [00:41<00:14, 14.22s/it, loss=2.2204, kind=default, case=HEM_PA99.nii.gz][A
+epoch 3/10:  75%|███████▌  | 3/4 [00:44<00:14, 14.22s/it, loss=0.7913, kind=default, case=HEM_PA99.nii.gz][A
+epoch 3/10: 100%|██████████| 4/4 [00:44<00:00,  9.59s/it, loss=0.7913, kind=default, case=HEM_PA99.nii.gz][A
+                                                                                                          [ADHGA Stage C:  30%|███       | 3/10 [11:36<26:06, 223.79s/it]
+epoch 4/10:   0%|          | 0/4 [00:00<?, ?it/s][A
+epoch 4/10:   0%|          | 0/4 [00:19<?, ?it/s, loss=0.7683, kind=default, case=HCC_10140276_20170][A
+epoch 4/10:  25%|██▌       | 1/4 [00:19<00:57, 19.26s/it, loss=0.7683, kind=default, case=HCC_10140276_20170][A
+epoch 4/10:  25%|██▌       | 1/4 [00:21<00:57, 19.26s/it, loss=1.5609, kind=default, case=HCC_10140276_20170][A
+epoch 4/10:  50%|█████     | 2/4 [00:21<00:18,  9.30s/it, loss=1.5609, kind=default, case=HCC_10140276_20170][A
+epoch 4/10:  50%|█████     | 2/4 [00:41<00:18,  9.30s/it, loss=1.1586, kind=default, case=HEM_PA99.nii.gz]   [A
+epoch 4/10:  75%|███████▌  | 3/4 [00:41<00:14, 14.08s/it, loss=1.1586, kind=default, case=HEM_PA99.nii.gz][A
+epoch 4/10:  75%|███████▌  | 3/4 [00:43<00:14, 14.08s/it, loss=1.7064, kind=default, case=HEM_PA99.nii.gz][A
+epoch 4/10: 100%|██████████| 4/4 [00:43<00:00,  9.48s/it, loss=1.7064, kind=default, case=HEM_PA99.nii.gz][A
+                                                                                                          [A
+DHGA evaluation-only:   0%|          | 0/8 [00:00<?, ?it/s][A
+DHGA evaluation-only:  12%|█▎        | 1/8 [01:09<08:04, 69.16s/it][A
+DHGA evaluation-only:  25%|██▌       | 2/8 [02:37<08:03, 80.62s/it][A
+DHGA evaluation-only:  38%|███▊      | 3/8 [03:19<05:14, 62.98s/it][A
+DHGA evaluation-only:  50%|█████     | 4/8 [04:26<04:18, 64.50s/it][A
+DHGA evaluation-only:  62%|██████▎   | 5/8 [06:52<04:41, 93.99s/it][A
+DHGA evaluation-only:  75%|███████▌  | 6/8 [07:36<02:33, 76.89s/it][A
+DHGA evaluation-only:  88%|████████▊ | 7/8 [08:55<01:17, 77.66s/it][A
+DHGA evaluation-only: 100%|██████████| 8/8 [09:13<00:00, 58.54s/it][ADHGA evaluation-only: 100%|██████████| 8/8 [09:13<00:00, 69.18s/it]
+DHGA Stage C:  40%|████      | 4/10 [21:34<37:09, 371.61s/it]
+epoch 5/10:   0%|          | 0/4 [00:00<?, ?it/s][A
+epoch 5/10:   0%|          | 0/4 [00:19<?, ?it/s, loss=1.5854, kind=default, case=HCC_10140276_20170][A
+epoch 5/10:  25%|██▌       | 1/4 [00:19<00:59, 19.98s/it, loss=1.5854, kind=default, case=HCC_10140276_20170][A
+epoch 5/10:  25%|██▌       | 1/4 [00:22<00:59, 19.98s/it, loss=1.0839, kind=default, case=HCC_10140276_20170][A
+epoch 5/10:  50%|█████     | 2/4 [00:22<00:19,  9.64s/it, loss=1.0839, kind=default, case=HCC_10140276_20170][A
+epoch 5/10:  50%|█████     | 2/4 [00:41<00:19,  9.64s/it, loss=1.5233, kind=default, case=HEM_PA99.nii.gz]   [A
+epoch 5/10:  75%|███████▌  | 3/4 [00:41<00:14, 14.01s/it, loss=1.5233, kind=default, case=HEM_PA99.nii.gz][A
+epoch 5/10:  75%|███████▌  | 3/4 [00:43<00:14, 14.01s/it, loss=2.7798, kind=default, case=HEM_PA99.nii.gz][A
+epoch 5/10: 100%|██████████| 4/4 [00:43<00:00,  9.43s/it, loss=2.7798, kind=default, case=HEM_PA99.nii.gz][A
+                                                                                                          [ADHGA Stage C:  50%|█████     | 5/10 [22:19<21:08, 253.63s/it]
+epoch 6/10:   0%|          | 0/4 [00:00<?, ?it/s][A
+epoch 6/10:   0%|          | 0/4 [00:19<?, ?it/s, loss=1.7855, kind=default, case=HCC_10140276_20170][A
+epoch 6/10:  25%|██▌       | 1/4 [00:19<00:57, 19.32s/it, loss=1.7855, kind=default, case=HCC_10140276_20170][A
+epoch 6/10:  25%|██▌       | 1/4 [00:21<00:57, 19.32s/it, loss=1.2929, kind=default, case=HCC_10140276_20170][A
+epoch 6/10:  50%|█████     | 2/4 [00:21<00:18,  9.42s/it, loss=1.2929, kind=default, case=HCC_10140276_20170][A
+epoch 6/10:  50%|█████     | 2/4 [00:41<00:18,  9.42s/it, loss=2.4321, kind=default, case=HEM_PA99.nii.gz]   [A
+epoch 6/10:  75%|███████▌  | 3/4 [00:41<00:14, 14.01s/it, loss=2.4321, kind=default, case=HEM_PA99.nii.gz][A
+epoch 6/10:  75%|███████▌  | 3/4 [00:43<00:14, 14.01s/it, loss=2.5477, kind=default, case=HEM_PA99.nii.gz][A
+epoch 6/10: 100%|██████████| 4/4 [00:43<00:00,  9.43s/it, loss=2.5477, kind=default, case=HEM_PA99.nii.gz][A
+                                                                                                          [A
+DHGA evaluation-only:   0%|          | 0/8 [00:00<?, ?it/s][A
+DHGA evaluation-only:  12%|█▎        | 1/8 [01:09<08:03, 69.12s/it][A
+DHGA evaluation-only:  25%|██▌       | 2/8 [02:37<08:02, 80.39s/it][A
+DHGA evaluation-only:  38%|███▊      | 3/8 [03:19<05:14, 62.87s/it][A
+DHGA evaluation-only:  50%|█████     | 4/8 [04:26<04:18, 64.54s/it][A
+DHGA evaluation-only:  62%|██████▎   | 5/8 [06:54<04:43, 94.57s/it][A
+DHGA evaluation-only:  75%|███████▌  | 6/8 [07:38<02:34, 77.27s/it][A
+DHGA evaluation-only:  88%|████████▊ | 7/8 [08:57<01:17, 77.85s/it][A
+DHGA evaluation-only: 100%|██████████| 8/8 [09:14<00:00, 58.59s/it][ADHGA evaluation-only: 100%|██████████| 8/8 [09:14<00:00, 69.30s/it]
+DHGA Stage C:  60%|██████    | 6/10 [32:18<24:44, 371.09s/it]
+epoch 7/10:   0%|          | 0/4 [00:00<?, ?it/s][A
+epoch 7/10:   0%|          | 0/4 [00:20<?, ?it/s, loss=1.6548, kind=default, case=HEM_PA99.nii.gz][A
+epoch 7/10:  25%|██▌       | 1/4 [00:20<01:01, 20.48s/it, loss=1.6548, kind=default, case=HEM_PA99.nii.gz][A
+epoch 7/10:  25%|██▌       | 1/4 [00:23<01:01, 20.48s/it, loss=2.6358, kind=default, case=HEM_PA99.nii.gz][A
+epoch 7/10:  50%|█████     | 2/4 [00:23<00:19,  9.97s/it, loss=2.6358, kind=default, case=HEM_PA99.nii.gz][A
+epoch 7/10:  50%|█████     | 2/4 [00:43<00:19,  9.97s/it, loss=2.6132, kind=default, case=HCC_10140276_20170][A
+epoch 7/10:  75%|███████▌  | 3/4 [00:43<00:14, 14.52s/it, loss=2.6132, kind=default, case=HCC_10140276_20170][A
+epoch 7/10:  75%|███████▌  | 3/4 [00:45<00:14, 14.52s/it, loss=1.1856, kind=default, case=HCC_10140276_20170][A
+epoch 7/10: 100%|██████████| 4/4 [00:45<00:00,  9.76s/it, loss=1.1856, kind=default, case=HCC_10140276_20170][A
+                                                                                                             [ADHGA Stage C:  70%|███████   | 7/10 [33:04<13:14, 264.78s/it]
+epoch 8/10:   0%|          | 0/4 [00:00<?, ?it/s][A
+epoch 8/10:   0%|          | 0/4 [00:19<?, ?it/s, loss=1.3011, kind=default, case=HCC_10140276_20170][A
+epoch 8/10:  25%|██▌       | 1/4 [00:19<00:59, 19.73s/it, loss=1.3011, kind=default, case=HCC_10140276_20170][A
+epoch 8/10:  25%|██▌       | 1/4 [00:22<00:59, 19.73s/it, loss=2.6323, kind=default, case=HCC_10140276_20170][A
+epoch 8/10:  50%|█████     | 2/4 [00:22<00:19,  9.57s/it, loss=2.6323, kind=default, case=HCC_10140276_20170][A
+epoch 8/10:  50%|█████     | 2/4 [00:41<00:19,  9.57s/it, loss=1.2785, kind=default, case=HEM_PA99.nii.gz]   [A
+epoch 8/10:  75%|███████▌  | 3/4 [00:41<00:14, 14.22s/it, loss=1.2785, kind=default, case=HEM_PA99.nii.gz][A
+epoch 8/10:  75%|███████▌  | 3/4 [00:44<00:14, 14.22s/it, loss=2.3539, kind=default, case=HEM_PA99.nii.gz][A
+epoch 8/10: 100%|██████████| 4/4 [00:44<00:00,  9.57s/it, loss=2.3539, kind=default, case=HEM_PA99.nii.gz][A
+                                                                                                          [A
+DHGA evaluation-only:   0%|          | 0/8 [00:00<?, ?it/s][A
+DHGA evaluation-only:  12%|█▎        | 1/8 [01:09<08:07, 69.63s/it][A
+DHGA evaluation-only:  25%|██▌       | 2/8 [02:39<08:07, 81.27s/it][A
+DHGA evaluation-only:  38%|███▊      | 3/8 [03:21<05:18, 63.73s/it][A
+DHGA evaluation-only:  50%|█████     | 4/8 [04:28<04:20, 65.00s/it][A
+DHGA evaluation-only:  62%|██████▎   | 5/8 [06:56<04:43, 94.63s/it][A
+DHGA evaluation-only:  75%|███████▌  | 6/8 [07:39<02:34, 77.25s/it][A
+DHGA evaluation-only:  88%|████████▊ | 7/8 [08:58<01:17, 77.71s/it][A
+DHGA evaluation-only: 100%|██████████| 8/8 [09:15<00:00, 58.49s/it][ADHGA evaluation-only: 100%|██████████| 8/8 [09:15<00:00, 69.44s/it]
+DHGA Stage C:  80%|████████  | 8/10 [43:05<12:23, 371.78s/it]
+epoch 9/10:   0%|          | 0/4 [00:00<?, ?it/s][A
+epoch 9/10:   0%|          | 0/4 [00:19<?, ?it/s, loss=2.2753, kind=default, case=HEM_PA99.nii.gz][A
+epoch 9/10:  25%|██▌       | 1/4 [00:19<00:57, 19.28s/it, loss=2.2753, kind=default, case=HEM_PA99.nii.gz][A
+epoch 9/10:  25%|██▌       | 1/4 [00:21<00:57, 19.28s/it, loss=1.4170, kind=default, case=HEM_PA99.nii.gz][A
+epoch 9/10:  50%|█████     | 2/4 [00:21<00:18,  9.32s/it, loss=1.4170, kind=default, case=HEM_PA99.nii.gz][A
+epoch 9/10:  50%|█████     | 2/4 [00:40<00:18,  9.32s/it, loss=2.7216, kind=default, case=HCC_10140276_20170][A
+epoch 9/10:  75%|███████▌  | 3/4 [00:40<00:13, 13.83s/it, loss=2.7216, kind=default, case=HCC_10140276_20170][A
+epoch 9/10:  75%|███████▌  | 3/4 [00:43<00:13, 13.83s/it, loss=2.2095, kind=default, case=HCC_10140276_20170][A
+epoch 9/10: 100%|██████████| 4/4 [00:43<00:00,  9.29s/it, loss=2.2095, kind=default, case=HCC_10140276_20170][A
+                                                                                                             [ADHGA Stage C:  90%|█████████ | 9/10 [43:48<04:29, 269.17s/it]
+epoch 10/10:   0%|          | 0/4 [00:00<?, ?it/s][A
+epoch 10/10:   0%|          | 0/4 [00:18<?, ?it/s, loss=1.9090, kind=default, case=HEM_PA99.nii.gz][A
+epoch 10/10:  25%|██▌       | 1/4 [00:18<00:56, 18.67s/it, loss=1.9090, kind=default, case=HEM_PA99.nii.gz][A
+epoch 10/10:  25%|██▌       | 1/4 [00:20<00:56, 18.67s/it, loss=2.9210, kind=default, case=HEM_PA99.nii.gz][A
+epoch 10/10:  50%|█████     | 2/4 [00:20<00:18,  9.01s/it, loss=2.9210, kind=default, case=HEM_PA99.nii.gz][A
+epoch 10/10:  50%|█████     | 2/4 [00:40<00:18,  9.01s/it, loss=1.4330, kind=default, case=HCC_10140276_20170][A
+epoch 10/10:  75%|███████▌  | 3/4 [00:40<00:13, 13.80s/it, loss=1.4330, kind=default, case=HCC_10140276_20170][A
+epoch 10/10:  75%|███████▌  | 3/4 [00:42<00:13, 13.80s/it, loss=0.9745, kind=default, case=HCC_10140276_20170][A
+epoch 10/10: 100%|██████████| 4/4 [00:42<00:00,  9.30s/it, loss=0.9745, kind=default, case=HCC_10140276_20170][A
+                                                                                                              [A
+DHGA evaluation-only:   0%|          | 0/8 [00:00<?, ?it/s][A
+DHGA evaluation-only:  12%|█▎        | 1/8 [01:09<08:05, 69.41s/it][A
+DHGA evaluation-only:  25%|██▌       | 2/8 [02:37<08:03, 80.50s/it][A
+DHGA evaluation-only:  38%|███▊      | 3/8 [03:19<05:14, 62.95s/it][A
+DHGA evaluation-only:  50%|█████     | 4/8 [04:26<04:18, 64.57s/it][A
+DHGA evaluation-only:  62%|██████▎   | 5/8 [06:53<04:42, 94.04s/it][A
+DHGA evaluation-only:  75%|███████▌  | 6/8 [07:36<02:33, 76.87s/it][A
+DHGA evaluation-only:  88%|████████▊ | 7/8 [08:55<01:17, 77.50s/it][A
+DHGA evaluation-only: 100%|██████████| 8/8 [09:12<00:00, 58.38s/it][ADHGA evaluation-only: 100%|██████████| 8/8 [09:12<00:00, 69.11s/it]
+DHGA Stage C: 100%|██████████| 10/10 [53:45<00:00, 370.29s/it]DHGA Stage C: 100%|██████████| 10/10 [53:45<00:00, 322.54s/it]
