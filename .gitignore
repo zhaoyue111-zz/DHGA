@@ -6,4 +6,4 @@ save/
 *.nii.gz
 *.nii
 *.npy
-*.pt
+*.pt.idea/
