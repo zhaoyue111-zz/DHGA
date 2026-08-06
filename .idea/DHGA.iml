@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<<<<<<< HEAD
+<module version="4">
+=======
+<module type="PYTHON_MODULE" version="4">
+  <component name="NewModuleRootManager">
+    <content url="file://$MODULE_DIR$" />
+    <orderEntry type="jdk" jdkName="voxtell" jdkType="Python SDK" />
+    <orderEntry type="sourceFolder" forTests="false" />
+  </component>
+>>>>>>> 974760c (使用stage_c_v42_fixed_corruption_overfit_zero_w10_1000的1000轮model推理)
+  <component name="PyDocumentationSettings">
+    <option name="format" value="PLAIN" />
+    <option name="myDocStringFormat" value="Plain" />
+  </component>
+</module>

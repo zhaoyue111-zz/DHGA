@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="Black">
+<<<<<<< HEAD
+    <option name="sdkName" value="Python 3.11" />
+  </component>
+  <component name="ProjectRootManager" version="2" project-jdk-name="Python 3.11" project-jdk-type="Python SDK" />
+=======
+    <option name="sdkName" value="voxtell" />
+  </component>
+>>>>>>> 974760c (使用stage_c_v42_fixed_corruption_overfit_zero_w10_1000的1000轮model推理)
+</project>

@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="SshConfigs">
+    <configs>
+      <sshConfig host="cci-proxy.cn-sh-01.sensecore.cn" id="da4f5abf-542a-4b9e-8a49-426f2d21eaa6" keyPath="C:\Users\zhaoyue\.ssh\id_ed25519" port="29437" nameFormat="DESCRIPTIVE" username="root" useOpenSSHConfig="true" />
+    </configs>
+  </component>
+</project>
