@@ -38,3 +38,31 @@ print(metrics)  # loss, bce_loss, dice_loss, dice, miou
 
 The wrapper accepts models that return logits directly, dictionaries containing
 `logits`, `seg_logits`, or `mask_logits`, or objects with a `logits` attribute.
+
+## DHGA/VoxTell runnable training
+
+The runnable entry point follows the DHGA source project data strategy:
+
+- split file: `worst_zeroshot_split_p0/worst_zeroshot_split.json`
+- image root: `/data/zy/CT_MRI_DATA_3D/images/P0`
+- label root: `/data/zy/CT_MRI_DATA_3D/labels/P0`
+- NIfTI reader: `NibabelIOWithReorient`
+- preprocessing, padding and sliding windows: VoxTell predictor methods
+
+Run from the repository root:
+
+```bash
+python -m sample_student_teacher.train_voxtell_sfda \
+  --voxtell_repo /data/zy/VoxTell_from_disk \
+  --model_dir /data/zy/VoxTell_from_disk/model \
+  --data_dir /data/zy/CT_MRI_DATA_3D/images/P0 \
+  --split_manifest /data/zy/DHGA/worst_zeroshot_split_p0/worst_zeroshot_split.json \
+  --val_label_dir /data/zy/CT_MRI_DATA_3D/labels/P0 \
+  --prompts liver \
+  --label_values 5 \
+  --epochs 1 \
+  --steps_per_volume 1
+```
+
+Each epoch writes `checkpoint_latest.pt`, `history.json`, and evaluation metrics
+with `dice` and binary `miou` under `.save/simple_student_teacher`.
